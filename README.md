@@ -1,6 +1,7 @@
 # VisionFive2_Car
 AI RC car on VisionFive 2 Lite
-https://github.com/starfive-tech/VisionFive2
+guild: https://doc-en.rvspace.org/VisionFive2Lite/VisionFive2LiteQSG/
+github: https://github.com/starfive-tech/VisionFive2
 https://rvspace.org/en/project/VisionFive2_Debian_Wiki_202302_Release
 https://debian.starfivetech.com/
 
