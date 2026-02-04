@@ -10,6 +10,12 @@ $ cd VisionFive2
 $ git checkout --track origin/JH7110_VisionFive2_devel
 $ git submodule update --init --recursive
 $ cd linux && git branch JH7110_VisionFive2_devel origin/JH7110_VisionFive2_devel && cd ..
+
+$ cd buildroot && git checkout --track origin/JH7110_VisionFive2_devel && cd ..
+$ cd u-boot && git checkout --track origin/JH7110_VisionFive2_devel && cd ..
+$ cd linux && git checkout --track origin/JH7110_VisionFive2_devel && cd ..
+$ cd opensbi && git checkout --track origin/JH7110_VisionFive2_devel && cd ..
+$ cd soft_3rdpart && git checkout JH7110_VisionFive2_devel && cd ..
 ```
 2. Install BalenaEtcher: Download and install BalenaEtcher on your Mac.
 3. Insert Card: Insert your Micro-SD card into your Mac using a reader.
