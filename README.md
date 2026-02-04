@@ -4,6 +4,13 @@ AI RC car on VisionFive 2 Lite
 ## FLashing the VisionFive 2 Lite
 Method 1: Flashing SD Card/eMMC (Recommended) This is the standard method for installing the OS.
 1. Download the Image: Download the latest SD card image (.img or .img.bz2 format) from the StarFive Tech GitHub releases. https://github.com/starfive-tech/VisionFive2
+```bash
+$ git clone https://github.com/starfive-tech/VisionFive2.git
+$ cd VisionFive2
+$ git checkout --track origin/JH7110_VisionFive2_devel
+$ git submodule update --init --recursive
+$ cd linux && git branch JH7110_VisionFive2_devel origin/JH7110_VisionFive2_devel && cd ..
+```
 2. Install BalenaEtcher: Download and install BalenaEtcher on your Mac.
 3. Insert Card: Insert your Micro-SD card into your Mac using a reader.
 4. Flash the Image:
