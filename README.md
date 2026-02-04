@@ -47,3 +47,13 @@ Import a Key (Replacement for apt-key add):
 gpg --import <key_file>.asc
 ```
 
+### Install gcc
+
+```bash
+brew update
+brew upgrade
+brew info gcc
+brew install gcc
+brew cleanup
+```
+
