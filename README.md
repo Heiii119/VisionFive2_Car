@@ -28,7 +28,7 @@ https://doc-en.rvspace.org/VisionFive2/Quick_Start_Guide/VisionFive2_QSGLite/log
 
 ### Installing packages 
 ```bash
-sudo apt install -y libcamera-apps
+sudo apt install -y v4l-utils libcamera-apps
 ```
 ### Camera
 ```bash
