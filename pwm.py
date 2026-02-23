@@ -18,7 +18,7 @@ THROTTLE_CHANNEL = 0
 STEERING_CHANNEL = 1
 
 # Default frequency (user can change in UI with 'f')
-PCA9685_START_FREQ_HZ = 50
+PCA9685_START_FREQ_HZ = 60
 
 # Your calibrated PCA9685 12-bit PWM "ticks" (0..4095)
 STEERING_LEFT_PWM    = 280
