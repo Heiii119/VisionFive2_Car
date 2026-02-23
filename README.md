@@ -34,7 +34,7 @@ https://doc-en.rvspace.org/VisionFive2/Quick_Start_Guide/VisionFive2_QSGLite/log
 ### 1) Installing basic packages: python3, i2c, libcamera
 ```bash
 sudo apt update
-sudo apt install -y python3-pip python3-smbus i2c-tools
+sudo apt install -y python3-flask python3-opencv python3-pip python3-smbus i2c-tools
 sudo apt install -y v4l-utils libcamera-apps
 ```
 
@@ -62,12 +62,34 @@ sudo i2cdetect -y 0
 ```
  You should see 40 if your board is at address 0x40.
 
-### 5) Camera
+### 5) Camera (USB Webcam)
+#### 5.1 check the camera device:
 ```bash
 cam -l
+ls -l /dev/video*
+v4l2-ctl --list-formats-ext 2>/dev/null || true
 ```
+
+### (ribbon camera IMX219)
 ```bash
 libcamera-hello --list-cameras
 libcamera-hello -t 0
 libcamera-hello -o test.jpg
+```
+
+## Step 3: PWM value
+- to check the motor and servo of the car
+- find the range of throttle and steering
+```bash
+python3 pwm.py
+```
+
+## Step 4: fpv driving
+### 1) run the program on the board
+```bash
+python3 vf2_web_drive_usbcam.py
+```
+### 2) connect a phone/tablet to the same network as the board and go to
+```bash
+http://<board-ip>:8000
 ```
