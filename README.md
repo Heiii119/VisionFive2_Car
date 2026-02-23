@@ -65,13 +65,32 @@ sudo i2cdetect -y 0
 ### 5) Camera (USB Webcam)
 #### 5.1 check the camera device:
 ```bash
-cam -l
 ls -l /dev/video*
+v4l2-ctl --list-devices
 v4l2-ctl --list-formats-ext 2>/dev/null || true
+```
+#### 5.2 change permission
+check if you see video in the output:
+```bash
+id
+group
+```
+if not: 
+```bash
+sudo usermod -aG video $USER
+sudo usermod -aG render $USER
+# IMPORTANT: log out and log back in (or reboot)
+```
+confirm the device node permissions/ACL:
+```bash
+id
+ls -l /dev/video0
+getfacl /dev/video0
 ```
 
 ### (ribbon camera IMX219)
 ```bash
+cam -l
 libcamera-hello --list-cameras
 libcamera-hello -t 0
 libcamera-hello -o test.jpg
