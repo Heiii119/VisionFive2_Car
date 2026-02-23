@@ -30,6 +30,10 @@ STEERING_LEFT_TICKS   = 280
 STEERING_CENTER_TICKS = 380  # usually midpoint of left/right; set as you like
 STEERING_RIGHT_TICKS  = 480
 
+# --- NEW: steering safety limits (ticks) ---
+STEERING_MIN_TICKS = 305
+STEERING_MAX_TICKS = 455
+
 # Startup outputs (ticks)
 START_THROTTLE_TICKS = THROTTLE_STOPPED_TICKS
 START_STEERING_TICKS = STEERING_CENTER_TICKS
@@ -257,6 +261,10 @@ def run(stdscr):
     def clamp12(v):
         return max(0, min(4095, int(v)))
 
+    # --- NEW: steering clamp using your min/max ---
+    def clamp_steering(v):
+        return max(STEERING_MIN_TICKS, min(STEERING_MAX_TICKS, int(v)))
+
     def redraw():
         freq = float(pwm.frequency)
         period_us = 1_000_000.0 / freq
@@ -278,6 +286,10 @@ def run(stdscr):
             19, 0,
             f"Presets: thr REV/STOP/FWD={THROTTLE_REVERSE_TICKS}/{THROTTLE_STOPPED_TICKS}/{THROTTLE_FORWARD_TICKS}  |  "
             f"ste L/C/R={STEERING_LEFT_TICKS}/{STEERING_CENTER_TICKS}/{STEERING_RIGHT_TICKS}          "
+        )
+        stdscr.addstr(
+            20, 0,
+            f"Steering limits: min={STEERING_MIN_TICKS}  max={STEERING_MAX_TICKS}                                                "
         )
         stdscr.refresh()
 
@@ -303,7 +315,8 @@ def run(stdscr):
 
     signal.signal(signal.SIGINT, sigint_handler)
 
-    # Apply startup outputs
+    # Apply startup outputs (clamp steering on startup too)
+    values["steering"] = clamp_steering(values["steering"])
     pwm.set_pwm_12bit(channels["throttle"], values["throttle"])
     pwm.set_pwm_12bit(channels["steering"], values["steering"])
 
@@ -334,10 +347,10 @@ def run(stdscr):
                     pwm.set_pwm_12bit(channels["throttle"], values["throttle"])
 
                 elif ch == curses.KEY_RIGHT:
-                    values["steering"] = clamp12(values["steering"] + STEERING_STEP)
+                    values["steering"] = clamp_steering(values["steering"] - STEERING_STEP)
                     pwm.set_pwm_12bit(channels["steering"], values["steering"])
                 elif ch == curses.KEY_LEFT:
-                    values["steering"] = clamp12(values["steering"] - STEERING_STEP)
+                    values["steering"] = clamp_steering(values["steering"] + STEERING_STEP)
                     pwm.set_pwm_12bit(channels["steering"], values["steering"])
 
                 elif ch in (ord('i'), ord('I')):
@@ -345,7 +358,10 @@ def run(stdscr):
                     s = prompt_input(stdscr, 21, 0, f"Enter 12-bit ticks (0..4095) for {key}: ")
                     try:
                         v = int(float(s))
-                        values[key] = clamp12(v)
+                        if key == "steering":
+                            values[key] = clamp_steering(v)
+                        else:
+                            values[key] = clamp12(v)
                         pwm.set_pwm_12bit(channels[key], values[key])
                     except Exception:
                         pass
@@ -366,7 +382,7 @@ def run(stdscr):
                     values["throttle"] = clamp12(THROTTLE_STOPPED_TICKS)
                     pwm.set_pwm_12bit(channels["throttle"], values["throttle"])
                 elif ch in (ord('c'), ord('C')):
-                    values["steering"] = clamp12(STEERING_CENTER_TICKS)
+                    values["steering"] = clamp_steering(STEERING_CENTER_TICKS)
                     pwm.set_pwm_12bit(channels["steering"], values["steering"])
 
             t = time.time()
