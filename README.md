@@ -35,8 +35,18 @@ https://doc-en.rvspace.org/VisionFive2/Quick_Start_Guide/VisionFive2_QSGLite/log
 ls /dev/i2c-*
 sudo apt update
 sudo apt install -y python3-pip python3-smbus i2c-tools
-pip3 install --user smbus2
+
 sudo apt install -y v4l-utils libcamera-apps
+```
+
+### Setup Virtual Environment
+```bash
+sudo apt install -y python3-venv python3-dev
+```
+
+### Cont. Insetalling packages under the virtual environment
+```bash
+pip3 install --user smbus2
 ```
 
 ### PCA9685
