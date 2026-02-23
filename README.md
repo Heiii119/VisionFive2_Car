@@ -116,6 +116,14 @@ python3 pwm.py
 ## Step 4: fpv driving
 ### 1) run the program on the board
 ```bash
+python app.py
+```
+### 2) connect a phone/tablet to the same network as the board and go to
+```bash
+http://<board-ip>:5000
+```
+### 1) run the program on the board
+```bash
 python3 vf2_web_drive_usbcam.py
 ```
 ### 2) connect a phone/tablet to the same network as the board and go to
