@@ -33,7 +33,6 @@ https://doc-en.rvspace.org/VisionFive2/Quick_Start_Guide/VisionFive2_QSGLite/log
 ## Step 3: Packages Installlation
 ### 1) Installing basic packages: python3, i2c, libcamera
 ```bash
-ls /dev/i2c-*
 sudo apt update
 sudo apt install -y python3-pip python3-smbus i2c-tools
 sudo apt install -y v4l-utils libcamera-apps
@@ -57,8 +56,9 @@ pip3 install Adafruit-PCA9685 adafruit-circuitpython-pca9685
 ### 4) Configure I2C PCA9685 servo board (under venv)
 sudo i2cdetect -y X  (replace X with your bus number)
 ```bash
+ls -l /dev/i2c*
+lsmod | grep i2c
 sudo i2cdetect -y 0
-sudo i2cdetect -y 1
 ```
  You should see 40 if your board is at address 0x40.
 
