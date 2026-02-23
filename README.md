@@ -67,13 +67,12 @@ sudo i2cdetect -y 0
 ```bash
 ls -l /dev/video*
 v4l2-ctl --list-devices
-v4l2-ctl --list-formats-ext 2>/dev/null || true
 ```
 #### 5.2 change permission
 check if you see video in the output:
 ```bash
 id
-group
+groups
 ```
 if not: 
 ```bash
@@ -84,7 +83,7 @@ sudo usermod -aG render $USER
 confirm the device node permissions/ACL:
 ```bash
 id
-ls -l /dev/video0
+v4l2-ctl --list-devices
 getfacl /dev/video0
 ```
 
