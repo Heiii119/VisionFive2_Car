@@ -39,6 +39,7 @@ STOP_ON_EXIT = True
 
 STEP = 5
 BIG_STEP = 10
+STEERING_STEP = 25
 UI_FPS = 30.0
 
 
@@ -333,10 +334,10 @@ def run(stdscr):
                     pwm.set_pwm_12bit(channels["throttle"], values["throttle"])
 
                 elif ch == curses.KEY_RIGHT:
-                    values["steering"] = clamp12(values["steering"] + STEP)
+                    values["steering"] = clamp12(values["steering"] + STEERING_STEP)
                     pwm.set_pwm_12bit(channels["steering"], values["steering"])
                 elif ch == curses.KEY_LEFT:
-                    values["steering"] = clamp12(values["steering"] - STEP)
+                    values["steering"] = clamp12(values["steering"] - STEERING_STEP)
                     pwm.set_pwm_12bit(channels["steering"], values["steering"])
 
                 elif ch in (ord('i'), ord('I')):
