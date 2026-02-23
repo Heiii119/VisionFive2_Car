@@ -5,7 +5,7 @@ AI RC car on VisionFive 2 Lite
 #### Installing the StarFive Debian image: 
 https://doc-en.rvspace.org/VisionFive2/Quick_Start_Guide/VisionFive2_QSG/flashing_with_mac_linux.html
 - image file: https://debian.starfivetech.com/
-####Installing the StarFive Ubuntu image:
+#### Installing the StarFive Ubuntu image:
 https://canonical-ubuntu-hardware-support.readthedocs-hosted.com/boards/how-to/starfive-visionfive-2/
 
 ### Flash the VisionFive 2 Image
@@ -19,9 +19,13 @@ https://canonical-ubuntu-hardware-support.readthedocs-hosted.com/boards/how-to/s
 https://doc-en.rvspace.org/VisionFive2/Quick_Start_Guide/VisionFive2_QSG/enable_ssh_root_login.html
 ```bash
 $ arp -a //to find the ip address
-$ echo 'PermitRootLogin=yes'  | sudo tee -a /etc/ssh/sshd_config //to enable ssh
-$ ssh user@<ip_addr> //pw: starfive
+$ echo 'PermitRootLogin=yes'  | sudo tee -a /etc/ssh/sshd_config 
 ```
+### SSH connection
+```bash
+$ ssh user@<ip_addr>  
+```
+pw: starfive
 
 #### Connection with ssh or UART Serial Port
 https://doc-en.rvspace.org/VisionFive2/Quick_Start_Guide/VisionFive2_QSGLite/logging_into_distro.html#logging_into_distro__section_v2l_jfw_mhc
