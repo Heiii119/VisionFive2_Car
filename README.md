@@ -50,9 +50,8 @@ Later, to use again: source car-venv/bin/activate
 
 ### 3) Insetalling packages under the virtual environment
 ```bash
-pip3 install --user smbus2
-pip3 install Adafruit-PCA9685
-pip3 install adafruit-circuitpython-pca9685
+pip3 install smbus2
+pip3 install Adafruit-PCA9685 adafruit-circuitpython-pca9685
 ```
 
 ### 4) Configure I2C PCA9685 servo board (under venv)
