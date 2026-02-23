@@ -32,8 +32,21 @@ https://doc-en.rvspace.org/VisionFive2/Quick_Start_Guide/VisionFive2_QSGLite/log
 
 ### Installing packages 
 ```bash
+ls /dev/i2c-*
+sudo apt update
+sudo apt install -y python3-pip python3-smbus i2c-tools
+pip3 install --user smbus2
 sudo apt install -y v4l-utils libcamera-apps
 ```
+
+### PCA9685
+sudo i2cdetect -y X  (replace X with your bus number)
+```bash
+sudo i2cdetect -y 0
+sudo i2cdetect -y 1
+```
+ You should see 40 if your board is at address 0x40.
+
 ### Camera
 ```bash
 cam -l
