@@ -51,6 +51,7 @@ Later, to use again: source car-venv/bin/activate
 ```bash
 pip3 install smbus2
 pip3 install Adafruit-PCA9685 adafruit-circuitpython-pca9685
+pip install flask opencv-python
 ```
 
 ### 4) Configure I2C PCA9685 servo board (under venv)
@@ -86,7 +87,17 @@ id
 v4l2-ctl --list-devices
 getfacl /dev/video0
 ```
-
+#### 5.3 quick check
+take a photo:
+```bash
+ffmpeg -f video4linux2 -i /dev/video4 -frames:v 1 -y frame.jpg
+ls -lh frame.jpg
+```
+take a video:
+```bash
+ffmpeg -f video4linux2 -i /dev/video4 -frames:v 1 -y frame.jpg
+ls -lh frame.jpg
+```
 ### (ribbon camera IMX219)
 ```bash
 cam -l
