@@ -42,10 +42,10 @@ sudo apt install -y v4l-utils libcamera-apps
 ### 2) Setup Virtual Environment
 ```bash
 sudo apt install -y python3-venv python3-dev
-python3 -m venv tflite-env
-source tflite-env/bin/activate
+python3 -m venv car-venv
+source car-venv/bin/activate
 ```
-Later, to use again: source tflite-env/bin/activate
+Later, to use again: source car-venv/bin/activate
 
 
 ### 3) Insetalling packages under the virtual environment
