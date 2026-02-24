@@ -11,7 +11,7 @@ DEVICE = "/dev/video4"
 WIDTH = 640
 HEIGHT = 480
 FPS = 15
-PORT = 5000
+PORT = 8000
 
 app = Flask(__name__)
 
