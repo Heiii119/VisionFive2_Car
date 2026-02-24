@@ -55,6 +55,7 @@ pip3 install Adafruit-PCA9685 adafruit-circuitpython-pca9685
 python -m pip install --upgrade pip
 python -m pip install flask
 python -m pip install opencv-python
+pip3 install flask-socketio eventlet
 ```
 
 ### 4) Configure I2C PCA9685 servo board (under venv)
