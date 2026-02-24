@@ -1,31 +1,229 @@
-from flask import Flask, Response, render_template_string
-from flask_socketio import SocketIO
+#!/usr/bin/env python3
+import time
+import sys
+import signal
+import threading
 import subprocess
 import socket
-import time
-import threading
 
-# -------------------------
-# Camera / streaming config
-# -------------------------
+from flask import Flask, Response, render_template_string
+from flask_socketio import SocketIO
+
+
+# =========================
+# Camera config (FFmpeg)
+# =========================
 DEVICE = "/dev/video4"
-WIDTH = 640
-HEIGHT = 480
-FPS = 15
+WIDTH = 1280
+HEIGHT = 720
+FPS = 30
+
+# If your camera isn't YUYV, set input format accordingly or remove -input_format line
+V4L2_INPUT_FORMAT = "yuyv422"  # common: yuyv422, mjpeg
+
+# Web server
 PORT = 5000
 
-app = Flask(__name__)
-app.config["SECRET_KEY"] = "fpv"
 
-# WebSocket server
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
+# =========================
+# PCA9685 config (your values)
+# =========================
+PCA9685_ADDR = 0x40
+PCA9685_FREQ = 60   # Hz
+I2C_BUS      = 0
+DRIVER_PREFER = "smbus2"   # "smbus2", "legacy", or "auto"
 
-# -------------------------
-# Control state (60Hz loop)
-# -------------------------
+THROTTLE_CHANNEL = 0
+STEERING_CHANNEL = 1
+
+THROTTLE_STOPPED_TICKS = 370
+THROTTLE_FORWARD_TICKS = 385
+THROTTLE_REVERSE_TICKS = 330
+
+STEERING_LEFT_TICKS   = 280
+STEERING_CENTER_TICKS = 380
+STEERING_RIGHT_TICKS  = 480
+
+STEERING_MIN_TICKS = 305
+STEERING_MAX_TICKS = 455
+
+THROTTLE_MIN_TICKS = 280
+THROTTLE_MAX_TICKS = 450
+
+STOP_ON_EXIT = True
+
+
+# =========================
+# Control mapping
+# =========================
 CONTROL_HZ = 60.0
 CONTROL_DT = 1.0 / CONTROL_HZ
 
+# When buttons held, what commands to apply:
+THROTTLE_STEP = 8        # ticks added/subtracted from STOPPED when pressing up/down
+STEER_STEP = 45          # ticks added/subtracted from CENTER when pressing left/right
+BRAKE_TICKS = THROTTLE_STOPPED_TICKS  # "brake" = stopped (you can change if your ESC supports braking)
+
+FAILSAFE_TIMEOUT_SEC = 0.35  # if no updates from phone -> brake+center
+
+
+# =========================
+# PCA9685 driver (unchanged)
+# =========================
+class PCA9685_SMBus2:
+    MODE1 = 0x00
+    MODE2 = 0x01
+    PRESCALE = 0xFE
+    LED0_ON_L = 0x06
+
+    RESTART = 0x80
+    SLEEP = 0x10
+    ALLCALL = 0x01
+    OUTDRV = 0x04
+
+    def __init__(self, busnum, address=0x40, frequency=60):
+        try:
+            from smbus2 import SMBus
+        except Exception as e:
+            raise SystemExit("Missing smbus2. Install with: python -m pip install smbus2") from e
+
+        self.address = int(address)
+        self._bus = SMBus(int(busnum))
+        self._frequency = None
+
+        self._write8(self.MODE1, self.ALLCALL)
+        self._write8(self.MODE2, self.OUTDRV)
+        time.sleep(0.005)
+
+        mode1 = self._read8(self.MODE1)
+        mode1 = mode1 & ~self.SLEEP
+        self._write8(self.MODE1, mode1)
+        time.sleep(0.005)
+
+        self.set_pwm_freq(frequency)
+
+    def close(self):
+        try:
+            self._bus.close()
+        except Exception:
+            pass
+
+    def _write8(self, reg, val):
+        self._bus.write_byte_data(self.address, reg, val & 0xFF)
+
+    def _read8(self, reg):
+        return self._bus.read_byte_data(self.address, reg) & 0xFF
+
+    def set_pwm_freq(self, freq_hz):
+        osc = 25_000_000.0
+        freq_hz = float(freq_hz)
+        prescaleval = (osc / (4096.0 * freq_hz)) - 1.0
+        prescale = int(round(prescaleval))
+        prescale = max(3, min(255, prescale))
+
+        oldmode = self._read8(self.MODE1)
+        newmode = (oldmode & 0x7F) | self.SLEEP
+        self._write8(self.MODE1, newmode)
+        self._write8(self.PRESCALE, prescale)
+        self._write8(self.MODE1, oldmode)
+        time.sleep(0.005)
+        self._write8(self.MODE1, oldmode | self.RESTART)
+        self._frequency = freq_hz
+
+    def set_pwm(self, channel, on, off):
+        ch = int(channel)
+        on = int(on) & 0x0FFF
+        off = int(off) & 0x0FFF
+        base = self.LED0_ON_L + 4 * ch
+        self._write8(base + 0, on & 0xFF)
+        self._write8(base + 1, (on >> 8) & 0xFF)
+        self._write8(base + 2, off & 0xFF)
+        self._write8(base + 3, (off >> 8) & 0xFF)
+
+    def set_pwm_12bit(self, channel, value_12bit):
+        v = max(0, min(4095, int(value_12bit)))
+        self.set_pwm(channel, 0, v)
+
+
+class PCA9685Driver:
+    def __init__(self, address=0x40, busnum=1, frequency=60, prefer="smbus2"):
+        self._mode = None
+        self._drv = None
+        smbus2_err = None
+
+        if prefer in ("smbus2", "auto"):
+            try:
+                self._drv = PCA9685_SMBus2(busnum=busnum, address=address, frequency=frequency)
+                self._mode = "smbus2"
+                return
+            except Exception as e:
+                if prefer == "smbus2":
+                    raise
+                smbus2_err = e
+
+        try:
+            import Adafruit_PCA9685 as LegacyPCA9685
+            self._drv = LegacyPCA9685.PCA9685(address=address, busnum=busnum)
+            self._drv.set_pwm_freq(frequency)
+            self._mode = "legacy"
+        except Exception as e:
+            raise SystemExit(
+                "Could not initialize PCA9685.\n"
+                "Tried:\n"
+                f"  - smbus2 direct driver: {smbus2_err}\n"
+                f"  - Adafruit_PCA9685: {e}\n\n"
+                "Fix:\n"
+                "  python -m pip install smbus2\n"
+                "and ensure /dev/i2c-<bus> exists and i2cdetect shows 0x40.\n"
+            )
+
+    def close(self):
+        if hasattr(self._drv, "close"):
+            self._drv.close()
+
+    def set_pwm_12bit(self, channel, value_12bit):
+        if self._mode == "legacy":
+            v = max(0, min(4095, int(value_12bit)))
+            self._drv.set_pwm(channel, 0, v)
+        else:
+            self._drv.set_pwm_12bit(channel, value_12bit)
+
+
+# =========================
+# Helpers
+# =========================
+def clamp(v, lo, hi):
+    return max(lo, min(hi, int(v)))
+
+def clamp_throttle(t):
+    return clamp(t, THROTTLE_MIN_TICKS, THROTTLE_MAX_TICKS)
+
+def clamp_steering(s):
+    return clamp(s, STEERING_MIN_TICKS, STEERING_MAX_TICKS)
+
+def safe_stop(pwm: PCA9685Driver):
+    try:
+        pwm.set_pwm_12bit(THROTTLE_CHANNEL, clamp_throttle(THROTTLE_STOPPED_TICKS))
+        pwm.set_pwm_12bit(STEERING_CHANNEL, clamp_steering(STEERING_CENTER_TICKS))
+    except Exception:
+        pass
+
+def detect_local_ips():
+    ips = set()
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ips.add(s.getsockname()[0])
+        s.close()
+    except Exception:
+        pass
+    ips.discard("127.0.0.1")
+    return sorted(ips)
+
+
+# =========================
+# Control state shared with WebSocket
+# =========================
 state_lock = threading.Lock()
 control_state = {
     "up": False,
@@ -37,11 +235,144 @@ control_state = {
     "last_seen": 0.0,
 }
 
-FAILSAFE_TIMEOUT_SEC = 0.35
 
-# -------------------------
-# Web UI (mobile landscape)
-# -------------------------
+def compute_ticks_from_state(s: dict):
+    """
+    Map button state -> PWM ticks.
+    This is deliberately simple. You can refine the mapping later.
+    """
+    # Steering
+    if s.get("center", False):
+        steer = STEERING_CENTER_TICKS
+    elif s.get("left", False) and not s.get("right", False):
+        steer = STEERING_CENTER_TICKS - STEER_STEP
+    elif s.get("right", False) and not s.get("left", False):
+        steer = STEERING_CENTER_TICKS + STEER_STEP
+    else:
+        steer = STEERING_CENTER_TICKS
+
+    # Throttle
+    if s.get("brake", False):
+        throttle = BRAKE_TICKS
+    else:
+        if s.get("up", False) and not s.get("down", False):
+            throttle = THROTTLE_STOPPED_TICKS + THROTTLE_STEP
+        elif s.get("down", False) and not s.get("up", False):
+            throttle = THROTTLE_STOPPED_TICKS - THROTTLE_STEP
+        else:
+            throttle = THROTTLE_STOPPED_TICKS
+
+    return clamp_steering(steer), clamp_throttle(throttle)
+
+
+def control_loop(pwm: PCA9685Driver):
+    next_t = time.perf_counter()
+    while True:
+        next_t += CONTROL_DT
+
+        with state_lock:
+            s = dict(control_state)
+
+        now = time.perf_counter()
+        if (now - s["last_seen"]) > FAILSAFE_TIMEOUT_SEC:
+            s["up"] = False
+            s["down"] = False
+            s["left"] = False
+            s["right"] = False
+            s["center"] = False
+            s["brake"] = True
+
+        steer, throttle = compute_ticks_from_state(s)
+
+        try:
+            pwm.set_pwm_12bit(STEERING_CHANNEL, steer)
+            pwm.set_pwm_12bit(THROTTLE_CHANNEL, throttle)
+        except Exception:
+            # if i2c hiccups, keep loop alive
+            pass
+
+        remaining = next_t - time.perf_counter()
+        if remaining > 0:
+            time.sleep(remaining)
+        else:
+            next_t = time.perf_counter()
+
+
+# =========================
+# MJPEG streaming via FFmpeg
+# =========================
+def ffmpeg_jpeg_pipe():
+    cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel", "error",
+
+        "-f", "video4linux2",
+        "-input_format", V4L2_INPUT_FORMAT,
+        "-framerate", str(FPS),
+        "-video_size", f"{WIDTH}x{HEIGHT}",
+        "-i", DEVICE,
+
+        "-an",
+        "-c:v", "mjpeg",
+        "-q:v", "7",
+        "-f", "image2pipe",
+        "-vcodec", "mjpeg",
+        "pipe:1",
+    ]
+    return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+
+
+def multipart_mjpeg_generator():
+    p = ffmpeg_jpeg_pipe()
+    boundary = b"--frame\r\n"
+
+    def read_one_jpeg(stream):
+        # find SOI 0xFFD8
+        start = stream.read(2)
+        if not start:
+            return None
+        while start != b"\xff\xd8":
+            nxt = stream.read(1)
+            if not nxt:
+                return None
+            start = start[1:] + nxt
+
+        buf = bytearray(start)
+        while True:
+            chunk = stream.read(4096)
+            if not chunk:
+                return None
+            buf.extend(chunk)
+            eoi = buf.find(b"\xff\xd9")
+            if eoi != -1:
+                return bytes(buf[: eoi + 2])
+
+    try:
+        while True:
+            jpg = read_one_jpeg(p.stdout)
+            if jpg is None:
+                break
+            headers = (
+                boundary +
+                b"Content-Type: image/jpeg\r\n" +
+                f"Content-Length: {len(jpg)}\r\n\r\n".encode()
+            )
+            yield headers + jpg + b"\r\n"
+    finally:
+        try:
+            p.kill()
+        except Exception:
+            pass
+
+
+# =========================
+# Flask + SocketIO UI
+# =========================
+app = Flask(__name__)
+app.config["SECRET_KEY"] = "fpv"
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
+
 HTML = """
 <!doctype html>
 <html>
@@ -67,17 +398,15 @@ HTML = """
     .cluster { pointer-events:none; display:grid; align-content:end; gap:10px; }
     .cluster.left { justify-items:start; } .cluster.right { justify-items:end; }
     .pad { pointer-events:auto; background:var(--panel2); border:1px solid var(--stroke); border-radius:14px;
-      padding:10px; display:grid; gap:10px; width:min(46vw, 320px); user-select:none; touch-action:none; backdrop-filter:blur(6px); }
+      padding:10px; display:grid; gap:10px; width:min(46vw, 340px); user-select:none; touch-action:none; backdrop-filter:blur(6px); }
     .row { display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px; }
     .row.two { grid-template-columns:1fr 1fr; }
     button.btn { width:100%; height:64px; border-radius:12px; border:1px solid var(--stroke); background:var(--btn);
       color:var(--text); font-size:16px; font-weight:700; letter-spacing:0.2px; }
-    button.btn:active { transform:scale(0.99); }
     button.btn.active { background:var(--btnActive); }
     button.btn.brake.active { background:var(--btnBrake); }
     .hint { pointer-events:none; position:absolute; left:12px; top:56px; font-size:12px; color:var(--muted);
       background:rgba(0,0,0,0.35); border:1px solid var(--stroke); padding:6px 8px; border-radius:10px; }
-    @media (orientation: portrait) { .hint::after { content:" (rotate phone to landscape)"; } }
   </style>
 </head>
 <body>
@@ -85,17 +414,14 @@ HTML = """
     <header>
       <div>
         <div><strong>FPV Drive</strong></div>
-        <div class="meta">Device: {{device}} • {{w}}x{{h}} @ {{fps}}fps • Control: 60Hz</div>
+        <div class="meta">{{device}} • {{w}}x{{h}} @ {{fps}}fps</div>
       </div>
       <div id="status" class="status">Connecting…</div>
     </header>
 
     <div class="main">
-      <div class="video">
-        <img id="stream" src="/mjpg" alt="stream" />
-      </div>
-
-      <div class="hint">Controls: Left/Right + Center (C) on left • Up/Down + Brake (Space) on right</div>
+      <div class="video"><img id="stream" src="/mjpg" alt="stream" /></div>
+      <div class="hint">Hold buttons to drive • Arrow keys work too • Brake = Space</div>
 
       <div class="controls">
         <div class="cluster left">
@@ -116,7 +442,7 @@ HTML = """
             </div>
             <div class="row two">
               <button class="btn" id="down">▼</button>
-              <button class="btn" id="noop" disabled style="opacity:0.35"> </button>
+              <button class="btn" disabled style="opacity:0.35"> </button>
             </div>
           </div>
         </div>
@@ -182,12 +508,11 @@ HTML = """
     statusEl.style.opacity = "0.7";
   });
 
-  // Send at 60Hz over websocket (no request queue)
   setInterval(() => {
     if (socket.connected) socket.emit("control", state);
   }, INTERVAL_MS);
 
-  // Safety: on blur, brake briefly
+  // Failsafe UX on tab switch
   const failSafe = () => {
     btnIds.forEach(id => setActive(id, false));
     setActive("brake", true);
@@ -201,121 +526,6 @@ HTML = """
 </html>
 """
 
-# -------------------------
-# Utilities
-# -------------------------
-def detect_local_ips():
-    ips = set()
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ips.add(s.getsockname()[0])
-        s.close()
-    except Exception:
-        pass
-    ips.discard("127.0.0.1")
-    return sorted(ips)
-
-# -------------------------
-# Camera: ffmpeg -> jpeg pipe -> multipart MJPEG
-# -------------------------
-def ffmpeg_jpeg_pipe():
-    cmd = [
-        "ffmpeg",
-        "-hide_banner",
-        "-loglevel", "error",
-
-        "-f", "video4linux2",
-        "-input_format", "yuyv422",
-        "-framerate", str(FPS),
-        "-video_size", f"{WIDTH}x{HEIGHT}",
-        "-i", DEVICE,
-
-        "-an",
-        "-c:v", "mjpeg",
-        "-q:v", "7",
-        "-f", "image2pipe",
-        "-vcodec", "mjpeg",
-        "pipe:1",
-    ]
-    return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
-
-def multipart_mjpeg_generator():
-    p = ffmpeg_jpeg_pipe()
-    boundary = b"--frame\r\n"
-
-    def read_one_jpeg(stream):
-        start = stream.read(2)
-        if not start:
-            return None
-        while start != b"\xff\xd8":
-            nxt = stream.read(1)
-            if not nxt:
-                return None
-            start = start[1:] + nxt
-
-        buf = bytearray(start)
-        while True:
-            chunk = stream.read(4096)
-            if not chunk:
-                return None
-            buf.extend(chunk)
-            eoi = buf.find(b"\xff\xd9")
-            if eoi != -1:
-                return bytes(buf[: eoi + 2])
-
-    try:
-        while True:
-            jpg = read_one_jpeg(p.stdout)
-            if jpg is None:
-                break
-            headers = (
-                boundary +
-                b"Content-Type: image/jpeg\r\n" +
-                f"Content-Length: {len(jpg)}\r\n\r\n".encode()
-            )
-            yield headers + jpg + b"\r\n"
-    finally:
-        try:
-            p.kill()
-        except Exception:
-            pass
-
-# -------------------------
-# Car control hook (YOU implement)
-# -------------------------
-def send_control(state: dict):
-    # Implement your real motor/servo output here.
-    pass
-
-def control_loop():
-    next_t = time.perf_counter()
-    while True:
-        next_t += CONTROL_DT
-
-        with state_lock:
-            s = dict(control_state)
-
-        now = time.perf_counter()
-        if (now - s["last_seen"]) > FAILSAFE_TIMEOUT_SEC:
-            s["up"] = False
-            s["down"] = False
-            s["left"] = False
-            s["right"] = False
-            s["center"] = False
-            s["brake"] = True
-
-        send_control(s)
-
-        remaining = next_t - time.perf_counter()
-        if remaining > 0:
-            time.sleep(remaining)
-        else:
-            next_t = time.perf_counter()
-
-# -------------------------
-# Routes
-# -------------------------
 @app.get("/")
 def index():
     return render_template_string(HTML, device=DEVICE, w=WIDTH, h=HEIGHT, fps=FPS)
@@ -327,14 +537,10 @@ def mjpg():
         mimetype="multipart/x-mixed-replace; boundary=frame",
     )
 
-# -------------------------
-# WebSocket events
-# -------------------------
 @socketio.on("control")
 def ws_control(data):
     def b(name):
         return bool((data or {}).get(name, False))
-
     with state_lock:
         control_state["up"] = b("up")
         control_state["down"] = b("down")
@@ -344,18 +550,40 @@ def ws_control(data):
         control_state["brake"] = b("brake")
         control_state["last_seen"] = time.perf_counter()
 
-# -------------------------
-# Main
-# -------------------------
-if __name__ == "__main__":
-    t = threading.Thread(target=control_loop, daemon=True)
+
+def main():
+    pwm = PCA9685Driver(
+        address=PCA9685_ADDR,
+        busnum=I2C_BUS,
+        frequency=PCA9685_FREQ,
+        prefer=DRIVER_PREFER,
+    )
+
+    def handle_exit(sig=None, frame=None):
+        if STOP_ON_EXIT:
+            safe_stop(pwm)
+        try:
+            pwm.close()
+        except Exception:
+            pass
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, handle_exit)
+    signal.signal(signal.SIGTERM, handle_exit)
+
+    safe_stop(pwm)
+
+    t = threading.Thread(target=control_loop, args=(pwm,), daemon=True)
     t.start()
 
-    print(f"FPV stream: {DEVICE} (YUYV) -> FFmpeg MJPEG -> Browser")
-    print(f"Open on phone: http://<board-ip>:{PORT}/")
     ips = detect_local_ips()
+    print(f"Open on phone: http://<board-ip>:{PORT}/")
     for ip in ips:
         print(f"  http://{ip}:{PORT}/")
 
     # IMPORTANT: use socketio.run (not app.run)
     socketio.run(app, host="0.0.0.0", port=PORT)
+
+
+if __name__ == "__main__":
+    main()
