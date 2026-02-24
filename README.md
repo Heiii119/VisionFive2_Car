@@ -36,6 +36,7 @@ https://doc-en.rvspace.org/VisionFive2/Quick_Start_Guide/VisionFive2_QSGLite/log
 sudo apt update
 sudo apt install -y python3-flask python3-opencv python3-pip python3-smbus i2c-tools
 sudo apt install -y v4l-utils libcamera-apps
+sudo apt install -y ffmpeg
 ```
 
 ### 2) Setup Virtual Environment
