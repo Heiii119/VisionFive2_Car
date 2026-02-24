@@ -66,19 +66,29 @@ sudo i2cdetect -y 0
 ```
  You should see 40 if your board is at address 0x40.
 
-### 5) Camera (USB Webcam)
-#### 5.1 check the camera device:
+
+
+## Step 3: PWM value
+- to check the motor and servo of the car
+- find the range of throttle and steering
+```bash
+python3 pwm.py
+```
+
+## Step 4: camera check
+### 4.1 quick check
+#### 1) check the camera device: Camera (USB Webcam)
 ```bash
 ls -l /dev/video*
 v4l2-ctl --list-devices
 ```
-#### 5.2 change permission
+#### 2) check permission
 check if you see video in the output:
 ```bash
 id
 groups
 ```
-if not: 
+if not, change permission: 
 ```bash
 sudo usermod -aG video $USER
 sudo usermod -aG render $USER
@@ -90,7 +100,7 @@ id
 v4l2-ctl --list-devices
 getfacl /dev/video0
 ```
-#### 5.3 quick check
+#### 3) quick check
 take a photo:
 ```bash
 ffmpeg -f video4linux2 -i /dev/video4 -frames:v 1 -y frame.jpg
@@ -101,39 +111,24 @@ take a video:
 ffmpeg -f video4linux2 -i /dev/video4 -frames:v 1 -y frame.jpg
 ls -lh frame.jpg
 ```
-### (ribbon camera IMX219)
+#### (ribbon camera IMX219)
 ```bash
 cam -l
 libcamera-hello --list-cameras
 libcamera-hello -t 0
 libcamera-hello -o test.jpg
 ```
-
-## Step 3: PWM value
-- to check the motor and servo of the car
-- find the range of throttle and steering
-```bash
-python3 pwm.py
-```
-
-## Step 4: fpv driving
-### 0) quick check
+### 4.2 check live streaming 
+#### 0) confirm packages
 ```bash
 python -c "import flask; print(flask.__version__)"
 ```
-### 1) run the program on the board
+#### 1) run the program on the board
 ```bash
-python app.py
+python app_ffmpeg_multipart.py
 ```
-### 2) connect a phone/tablet to the same network as the board and go to
+#### 2) connect a phone/tablet to the same network as the board and go to
 ```bash
 http://<board-ip>:5000
 ```
-### 1) run the program on the board
-```bash
-python3 vf2_web_drive_usbcam.py
-```
-### 2) connect a phone/tablet to the same network as the board and go to
-```bash
-http://<board-ip>:8000
-```
+## Step 5: fpv driving
