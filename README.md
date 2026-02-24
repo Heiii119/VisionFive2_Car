@@ -117,6 +117,10 @@ python3 pwm.py
 ```
 
 ## Step 4: fpv driving
+### 0) quick check
+```bash
+python -c "import flask; print(flask.__version__)"
+```
 ### 1) run the program on the board
 ```bash
 python app.py
