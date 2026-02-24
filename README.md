@@ -51,7 +51,9 @@ Later, to use again: source car-venv/bin/activate
 ```bash
 pip3 install smbus2
 pip3 install Adafruit-PCA9685 adafruit-circuitpython-pca9685
-pip install flask opencv-python
+python -m pip install --upgrade pip
+python -m pip install flask
+python -m pip install opencv-python
 ```
 
 ### 4) Configure I2C PCA9685 servo board (under venv)
