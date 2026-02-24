@@ -50,13 +50,12 @@ Later, to use again: source car-venv/bin/activate
 
 ### 3) Insetalling packages under the virtual environment
 ```bash
-python3 -m pip install smbus2 Adafruit-PCA9685 adafruit-circuitpython-pca9685
-python3 -m pip install --upgrade pip
-python3 -m pip install flask
-python3 -m pip install opencv-python
-python3 -m pip install flask-socketio eventlet
+python -m pip install smbus2 Adafruit-PCA9685 adafruit-circuitpython-pca9685
+python -m pip install --upgrade pip
+python -m pip install flask flask-socketio eventlet
+python -m pip install opencv-python
 ```
-
+** choose FFmpeg or OpenCV either one, OpenCV may be hard on riscv64 as there often are no prebuilt wheels, so it may still try to compile and could fail or take a long time.
 ### 4) Configure I2C PCA9685 servo board (under venv)
 sudo i2cdetect -y X  (replace X with your bus number)
 ```bash
