@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
 """
-Live MJPEG stream + big driving label overlay
-+ PCA9685 motor/servo output
-+ WEB Emergency Stop (E-STOP latch)
+Live MJPEG stream starts immediately on program run.
+Motors are SAFETY-GATED behind an ARM switch:
+- Default: DISARMED (throttle forced to STOP)
+- Web: ARM/DISARM buttons
+- Keyboard (optional, if you have a display): 'y' to ARM, 'n' to DISARM
+- E-STOP latch (web): overrides everything and forces throttle STOP
 
 Endpoints:
-  /            - page with stream + E-STOP controls
-  /mjpg        - MJPEG stream (overlay label + E-STOP state)
-  POST /estop  - engage E-STOP (latches)
-  POST /release- release E-STOP (unlatch)
-  GET  /estop?on=1 or /estop?on=0 (optional convenience)
-  GET  /estop_state - returns JSON {estop: bool}
+  /              - page with stream + bottom bar controls (E-STOP + ARM)
+  /mjpg          - MJPEG stream
+  POST /estop    - engage E-STOP (latches)
+  POST /release  - release E-STOP
+  POST /arm      - arm driving (throttle allowed)
+  POST /disarm   - disarm (throttle forced STOP)
+  GET  /state    - JSON {estop, reason, armed}
 """
 
 import time
@@ -57,12 +61,12 @@ THROTTLE_CHANNEL = 0
 STEERING_CHANNEL = 1
 
 THROTTLE_STOPPED_TICKS = 370
-THROTTLE_FORWARD_TICKS = 415
+THROTTLE_FORWARD_TICKS = 385
 THROTTLE_REVERSE_TICKS = 330
 
-STEERING_LEFT_TICKS = 455
+STEERING_LEFT_TICKS = 305
 STEERING_CENTER_TICKS = 380
-STEERING_RIGHT_TICKS = 305
+STEERING_RIGHT_TICKS = 455
 
 STEERING_MIN_TICKS = 305
 STEERING_MAX_TICKS = 455
@@ -101,15 +105,18 @@ LOST_LINE_TIMEOUT_SEC = 0.6
 
 CENTROID_HISTORY = 5
 
-# Decision thresholds for the LABEL (not for PWM)
+# Label thresholds (overlay only)
 TURN_THRESH = 0.15
 
 # =========================
-# Global: E-STOP latch
+# Global: E-STOP latch + ARM gate
 # =========================
 estop_lock = threading.Lock()
 estop_latched = False
 estop_reason = "manual"
+
+armed_lock = threading.Lock()
+armed = False  # IMPORTANT: start disarmed; streaming still runs
 
 def set_estop(on: bool, reason: str = "manual"):
     global estop_latched, estop_reason
@@ -122,6 +129,15 @@ def get_estop():
     with estop_lock:
         return bool(estop_latched), str(estop_reason)
 
+def set_armed(v: bool):
+    global armed
+    with armed_lock:
+        armed = bool(v)
+
+def is_armed():
+    with armed_lock:
+        return bool(armed)
+
 # =========================
 # Flask + shared frame
 # =========================
@@ -133,10 +149,9 @@ HTML = """
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <style>
   body { font-family: system-ui, sans-serif; margin: 0; background:#fff; }
-  .wrap { max-width: 980px; margin: 0 auto; padding: 12px 12px 110px; } /* bottom padding for bar */
+  .wrap { max-width: 980px; margin: 0 auto; padding: 12px 12px 125px; }
   img { width: 100%; height: auto; border: 1px solid #ccc; border-radius: 10px; display:block; }
 
-  /* Bottom fixed control bar */
   .bottomBar {
     position: fixed;
     left: 0; right: 0; bottom: 0;
@@ -167,24 +182,29 @@ HTML = """
     border: 0; border-radius: 12px; padding: 14px 18px;
     font-weight: 900; cursor: pointer;
   }
+
   .stop { background: #b00020; color: #fff; }
   .rel  { background: #1b5e20; color: #fff; }
-  .small { font-size: 12px; color: #555; margin-top: 6px; }
+  .arm  { background: #0d47a1; color: #fff; }
+  .dis  { background: #37474f; color: #fff; }
+
+  .small { font-size: 12px; color: #555; margin-top: 8px; line-height:1.35; }
 </style>
 
 <div class="wrap">
   <h1 style="margin: 8px 0 12px;">Live Stream</h1>
   <img src="/mjpg" />
   <div class="small">
-    Tip: If you lose Wi‑Fi, this button can’t help. Consider adding a physical kill switch too.
+    Motors are <b>DISARMED</b> by default (safe). Use <b>ARM</b> to allow throttle output.
+    E‑STOP always forces throttle STOP. If you lose Wi‑Fi, web buttons can’t help—add a physical kill switch too.
   </div>
 </div>
 
-<!-- Fixed bottom controls -->
 <div class="bottomBar">
   <div class="row">
     <div class="leftGroup">
       <span class="pill">Stream: <code>/mjpg</code></span>
+      <span class="pill" id="armedPill">ARM: …</span>
       <span class="pill" id="estopPill">E-STOP: …</span>
     </div>
 
@@ -196,6 +216,14 @@ HTML = """
       <form method="POST" action="/release" style="margin:0;">
         <button class="rel" type="submit">Release</button>
       </form>
+
+      <form method="POST" action="/arm" style="margin:0;">
+        <button class="arm" type="submit">ARM</button>
+      </form>
+
+      <form method="POST" action="/disarm" style="margin:0;">
+        <button class="dis" type="submit">DISARM</button>
+      </form>
     </div>
   </div>
 </div>
@@ -203,17 +231,29 @@ HTML = """
 <script>
   async function poll() {
     try {
-      const r = await fetch("/estop_state", { cache: "no-store" });
+      const r = await fetch("/state", { cache: "no-store" });
       const s = await r.json();
-      const pill = document.getElementById("estopPill");
+
+      const e = document.getElementById("estopPill");
       if (s.estop) {
-        pill.textContent = "E-STOP: ON (" + (s.reason || "manual") + ")";
-        pill.style.background = "#ffe6e6";
-        pill.style.borderColor = "#b00020";
+        e.textContent = "E-STOP: ON (" + (s.reason || "manual") + ")";
+        e.style.background = "#ffe6e6";
+        e.style.borderColor = "#b00020";
       } else {
-        pill.textContent = "E-STOP: OFF";
-        pill.style.background = "#eaffea";
-        pill.style.borderColor = "#1b5e20";
+        e.textContent = "E-STOP: OFF";
+        e.style.background = "#eaffea";
+        e.style.borderColor = "#1b5e20";
+      }
+
+      const a = document.getElementById("armedPill");
+      if (s.armed) {
+        a.textContent = "ARM: ON";
+        a.style.background = "#e3f2fd";
+        a.style.borderColor = "#0d47a1";
+      } else {
+        a.textContent = "ARM: OFF";
+        a.style.background = "#eeeeee";
+        a.style.borderColor = "#37474f";
       }
     } catch (e) {}
   }
@@ -299,20 +339,20 @@ def release_post():
     set_estop(False, "web")
     return redirect("/")
 
-@app.get("/estop")
-def estop_get():
-    # convenience: /estop?on=1 or /estop?on=0
-    on = request.args.get("on", "").strip()
-    if on in ("1", "true", "on", "yes"):
-        set_estop(True, "web")
-    elif on in ("0", "false", "off", "no"):
-        set_estop(False, "web")
+@app.post("/arm")
+def arm_post():
+    set_armed(True)
     return redirect("/")
 
-@app.get("/estop_state")
-def estop_state():
+@app.post("/disarm")
+def disarm_post():
+    set_armed(False)
+    return redirect("/")
+
+@app.get("/state")
+def state():
     on, reason = get_estop()
-    return jsonify({"estop": on, "reason": reason})
+    return jsonify({"estop": on, "reason": reason, "armed": is_armed()})
 
 def start_flask_in_thread():
     def _run():
@@ -324,6 +364,7 @@ def start_flask_in_thread():
         else:
             print(f"  http://127.0.0.1:{FLASK_PORT}/")
         app.run(host=FLASK_HOST, port=FLASK_PORT, threaded=True, use_reloader=False)
+
     t = threading.Thread(target=_run, daemon=True)
     t.start()
     return t
@@ -425,13 +466,16 @@ def compute_label(line_found: bool, err_norm, last_seen_age: float):
         return "TURN LEFT"
     return "GO STRAIGHT"
 
-def draw_banner(frame_bgr, label: str, steer_ticks: int, throttle_ticks: int, estop_on: bool):
+def draw_banner(frame_bgr, label: str, steer_ticks: int, throttle_ticks: int, estop_on: bool, armed_on: bool):
     h, w = frame_bgr.shape[:2]
     banner_h = max(80, h // 7)
 
     if estop_on:
         label2 = "E-STOP"
         color = (0, 0, 255)
+    elif not armed_on:
+        label2 = "DISARMED"
+        color = (200, 200, 200)
     else:
         label2 = label
         if label2 == "LOST LINE":
@@ -493,7 +537,7 @@ def main():
     steer_f = float(steer_ticks)
 
     last_pub = 0.0
-    print("\n[run] /mjpg stream + E-STOP. Ctrl+C to exit.\n")
+    print("\n[run] Streaming starts immediately. Motors are DISARMED until you press ARM (web) or 'y' (keyboard).\n")
 
     try:
         while True:
@@ -503,6 +547,13 @@ def main():
                 continue
 
             now = time.time()
+
+            # Optional keyboard arming (only works if a GUI is available somewhere)
+            k = cv2.waitKey(1) & 0xFF
+            if k == ord('y'):
+                set_armed(True)
+            elif k == ord('n'):
+                set_armed(False)
 
             frame_small = cv2.resize(frame, (STREAM_W, STREAM_H), interpolation=cv2.INTER_AREA)
             h, w = frame_small.shape[:2]
@@ -522,20 +573,19 @@ def main():
                 calibrated = True
                 print(f"[cal] h={h_med} => [{h_low},{h_high}]")
 
-            # Default outputs
+            # Detect line
             line_found = False
             cx = None
             err_norm = None
 
-            # Vision only matters if not E-STOP (we still compute label though)
             hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
             lower = np.array([h_low, S_MIN, V_MIN], dtype=np.uint8)
             upper = np.array([h_high, 255, 255], dtype=np.uint8)
             mask = cv2.inRange(hsv, lower, upper)
 
-            k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (MORPH_K, MORPH_K))
-            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k, iterations=1)
-            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k, iterations=1)
+            k2 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (MORPH_K, MORPH_K))
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k2, iterations=1)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k2, iterations=1)
 
             contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             if contours:
@@ -555,7 +605,7 @@ def main():
             age = now - last_seen if last_seen > 0 else 1e9
             label = compute_label(line_found, err_norm, age)
 
-            # Compute steering/throttle normally...
+            # Compute steering/throttle commands
             if line_found and err_norm is not None:
                 steer_target = STEERING_CENTER_TICKS + KP_STEER * err_norm
                 steer_target = np.clip(steer_target, STEERING_MIN_TICKS, STEERING_MAX_TICKS)
@@ -572,14 +622,16 @@ def main():
             steer_ticks_cmd = clamp(steer_ticks_cmd, STEERING_MIN_TICKS, STEERING_MAX_TICKS)
             throttle_ticks_cmd = clamp(throttle_ticks_cmd, THROTTLE_MIN_TICKS, THROTTLE_MAX_TICKS)
 
-            # ...but E-STOP overrides throttle to STOPPED (latched)
+            # Safety gates
             estop_on, _ = get_estop()
-            if estop_on:
+            armed_on = is_armed()
+
+            steer_ticks = int(steer_ticks_cmd)
+
+            if estop_on or (not armed_on):
                 throttle_ticks = int(THROTTLE_STOPPED_TICKS)
-                steer_ticks = int(steer_ticks_cmd)  # keep steering (or set to center if you prefer)
             else:
                 throttle_ticks = int(throttle_ticks_cmd)
-                steer_ticks = int(steer_ticks_cmd)
 
             # Output to PCA9685
             if pca is not None:
@@ -590,7 +642,8 @@ def main():
                     print(f"[pca] write failed: {e} (disabling)")
                     pca = None
 
-            out = draw_banner(frame_small, label, steer_ticks, throttle_ticks, estop_on)
+            # Overlay + publish stream
+            out = draw_banner(frame_small, label, steer_ticks, throttle_ticks, estop_on, armed_on)
 
             if now - last_pub >= (1.0 / STREAM_FPS):
                 jpg = encode_jpg(out)
@@ -598,7 +651,7 @@ def main():
                     shared.update(jpg)
                 last_pub = now
 
-            # Optionally pace CPU a bit
+            # Optional pacing
             # time.sleep(max(0.0, (1.0/CONTROL_HZ) - (time.time() - now)))
 
     except KeyboardInterrupt:
