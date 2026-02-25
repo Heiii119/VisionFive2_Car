@@ -85,10 +85,13 @@ LOST_LINE_TIMEOUT_SEC = 0.6
 
 CENTROID_HISTORY = 5
 
-# Debug overlay options
-SHOW_MASK_PIP = True
-MASK_PIP_SCALE = 0.33  # relative to stream frame width
-MASK_PIP_MARGIN = 10
+# =========================
+# Debug-frame (bottom stream) config
+# =========================
+DEBUG_STREAM_FPS = 15
+DEBUG_TEXT_SCALE = 0.95
+DEBUG_TEXT_THICK = 2
+DEBUG_LINE_THICK = 3
 
 # =========================
 # Shared-frame streamer (pure OpenCV)
@@ -102,20 +105,25 @@ HTML = """
 <style>
   body { font-family: system-ui, sans-serif; margin: 16px; }
   .wrap { max-width: 980px; margin: 0 auto; }
-  img { width: 100%; height: auto; border: 1px solid #ccc; border-radius: 8px; }
+  img { width: 100%; height: auto; border: 1px solid #ccc; border-radius: 8px; display:block; }
   code { background: #f6f6f6; padding: 2px 6px; border-radius: 6px; }
   .row { display: flex; flex-wrap: wrap; gap: 10px; }
   .pill { display: inline-block; padding: 6px 10px; border: 1px solid #ddd; border-radius: 999px; background: #fafafa; }
+  .spacer { height: 10px; }
 </style>
 <div class="wrap">
-  <h1>Live Camera Stream (Debug)</h1>
+  <h1>Live Camera Stream</h1>
   <div class="row">
     <span class="pill">Device: <code>{{device}}</code></span>
     <span class="pill">Stream: {{sw}}×{{sh}} @ {{sfps}} fps</span>
     <span class="pill">Port: {{port}}</span>
   </div>
-  <p>Shows ROI, mask preview, centroid, and steering error.</p>
+
+  <p>Top: raw stream. Bottom: debug frame (readouts + markers).</p>
+
   <img src="/mjpg" />
+  <div class="spacer"></div>
+  <img src="/debug_mjpg" />
 </div>
 """
 
@@ -134,7 +142,8 @@ class SharedFrame:
         with self._lock:
             return self._jpg, self._ts
 
-shared = SharedFrame()
+shared = SharedFrame()              # top stream (raw)
+shared_debug = SharedFrame()        # bottom stream (debug)
 
 def detect_local_ips():
     ips = set()
@@ -148,11 +157,11 @@ def detect_local_ips():
     ips.discard("127.0.0.1")
     return sorted(ips)
 
-def multipart_mjpeg_generator():
+def multipart_mjpeg_generator_for(shared_obj: SharedFrame):
     boundary = b"--frame\r\n"
     last_ts = 0.0
     while True:
-        jpg, ts = shared.get_jpg()
+        jpg, ts = shared_obj.get_jpg()
         if jpg is None or ts == last_ts:
             time.sleep(0.01)
             continue
@@ -178,7 +187,14 @@ def index():
 @app.get("/mjpg")
 def mjpg():
     return Response(
-        multipart_mjpeg_generator(),
+        multipart_mjpeg_generator_for(shared),
+        mimetype="multipart/x-mixed-replace; boundary=frame",
+    )
+
+@app.get("/debug_mjpg")
+def debug_mjpg():
+    return Response(
+        multipart_mjpeg_generator_for(shared_debug),
         mimetype="multipart/x-mixed-replace; boundary=frame",
     )
 
@@ -434,109 +450,85 @@ def prompt_start():
     ans = input("\nPress (y) to start line following: ").strip().lower()
     return ans == "y"
 
-def draw_debug_overlays(
-    frame_bgr,
-    roi_y0,
-    mask_roi,
-    cx_roi,
-    err,
-    steer_ticks,
-    throttle_ticks,
-    line_ok,
-    area=0.0,
-):
-    """
-    Draws overlays directly on the full frame (BGR).
-    - ROI rectangle boundary
-    - centroid marker + centerline
-    - steering error text
-    - mask PIP
-    """
-    h, w = frame_bgr.shape[:2]
-
-    # ROI box
-    cv2.rectangle(frame_bgr, (0, roi_y0), (w - 1, h - 1), (0, 255, 255), 2)
-    cv2.putText(frame_bgr, "ROI", (10, roi_y0 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-
-    # Center vertical line (in ROI region)
-    cx_frame_center = w // 2
-    cv2.line(frame_bgr, (cx_frame_center, roi_y0), (cx_frame_center, h - 1), (255, 255, 0), 2)
-
-    # Detected centroid (convert ROI x to frame x, ROI y is mid of ROI just for marker)
-    if line_ok and cx_roi is not None:
-        x_line = int(round(cx_roi))
-        y_marker = int(roi_y0 + (h - roi_y0) * 0.5)
-        cv2.circle(frame_bgr, (x_line, y_marker), 10, (0, 0, 255), -1)
-        cv2.line(frame_bgr, (x_line, roi_y0), (x_line, h - 1), (0, 0, 255), 2)
-        cv2.putText(
-            frame_bgr,
-            f"line_x={x_line}px area={area:.0f}",
-            (10, roi_y0 + 30),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.65,
-            (0, 0, 255),
-            2,
-        )
-    else:
-        cv2.putText(
-            frame_bgr,
-            "LINE LOST",
-            (10, roi_y0 + 30),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.8,
-            (0, 0, 255),
-            2,
-        )
-
-    # Control text
-    cv2.putText(
-        frame_bgr,
-        f"err={err:+.3f} steer={int(steer_ticks)} thr={int(throttle_ticks)}",
-        (10, 30),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.7,
-        (255, 255, 255),
-        2,
-    )
-
-    # Mask PIP
-    if SHOW_MASK_PIP and mask_roi is not None:
-        mask_rgb = cv2.cvtColor(mask_roi, cv2.COLOR_GRAY2BGR)
-
-        pip_w = int(STREAM_W * MASK_PIP_SCALE)
-        # maintain mask aspect
-        mh, mw = mask_rgb.shape[:2]
-        pip_h = int(pip_w * (mh / float(mw)))
-        pip = cv2.resize(mask_rgb, (pip_w, pip_h), interpolation=cv2.INTER_NEAREST)
-
-        x0 = w - pip_w - MASK_PIP_MARGIN
-        y0 = MASK_PIP_MARGIN
-        x1 = x0 + pip_w
-        y1 = y0 + pip_h
-
-        # background box
-        cv2.rectangle(frame_bgr, (x0 - 2, y0 - 22), (x1 + 2, y1 + 2), (0, 0, 0), -1)
-        cv2.putText(frame_bgr, "mask", (x0, y0 - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-
-        frame_bgr[y0:y1, x0:x1] = pip
-
-    return frame_bgr
-
-def encode_and_publish_stream(frame_bgr, last_emit_t):
+def publish_shared_frame(shared_obj: SharedFrame, frame_bgr, last_emit_t, fps_limit):
     now = time.time()
-    if (now - last_emit_t) < (1.0 / float(STREAM_FPS)):
+    if (now - last_emit_t) < (1.0 / float(fps_limit)):
         return last_emit_t
-
-    small = cv2.resize(frame_bgr, (STREAM_W, STREAM_H), interpolation=cv2.INTER_AREA)
     ok, jpg = cv2.imencode(
         ".jpg",
-        small,
+        frame_bgr,
         [int(cv2.IMWRITE_JPEG_QUALITY), int(STREAM_JPEG_QUALITY)]
     )
     if ok:
-        shared.update_jpg(jpg.tobytes())
+        shared_obj.update_jpg(jpg.tobytes())
         return now
     return last_emit_t
+
+def make_debug_frame(
+    w, h,
+    status_text,
+    line_ok,
+    roi_y0,
+    cx,
+    area,
+    err,
+    steer_ticks,
+    throttle_ticks,
+    h_center, s_center, v_center,
+):
+    img = np.zeros((h, w, 3), dtype=np.uint8)
+
+    # Header
+    color = (0, 255, 0) if line_ok else (0, 0, 255)
+    cv2.putText(
+        img,
+        f"DEBUG: {status_text}",
+        (12, 42),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        1.15,
+        color,
+        3,
+    )
+
+    # Readouts (big / phone-friendly)
+    y = 90
+    step = 44
+
+    def put(label, value):
+        nonlocal y
+        cv2.putText(
+            img,
+            f"{label}: {value}",
+            (12, y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            DEBUG_TEXT_SCALE,
+            (255, 255, 255),
+            DEBUG_TEXT_THICK,
+        )
+        y += step
+
+    put("HSV", f"H={h_center} S={s_center} V={v_center}")
+    put("ROI y0", f"{roi_y0}px")
+    put("Centroid x", "—" if cx is None else f"{cx:.1f}px")
+    put("Area", f"{area:.0f}")
+    put("Error", f"{err:+.4f}")
+    put("Steer ticks", f"{steer_ticks:.1f}")
+    put("Throttle ticks", f"{throttle_ticks:.1f}")
+
+    # Horizontal "position" bar: center + centroid marker
+    bar_y = h - 70
+    bar_x0, bar_x1 = 20, w - 20
+    center_x = (bar_x0 + bar_x1) // 2
+
+    cv2.line(img, (bar_x0, bar_y), (bar_x1, bar_y), (120, 120, 120), 6)
+    cv2.line(img, (center_x, bar_y - 20), (center_x, bar_y + 20), (255, 255, 0), 5)
+
+    if cx is not None:
+        px = int(bar_x0 + (cx / float(WIDTH)) * (bar_x1 - bar_x0))
+        px = max(bar_x0, min(bar_x1, px))
+        cv2.circle(img, (px, bar_y), 14, (0, 0, 255), -1)
+
+    return img
 
 # =========================
 # Main line-follow loop
@@ -554,9 +546,9 @@ def run_line_following(cap, pwm, h_center, s_center, v_center):
     next_t = time.perf_counter()
 
     last_stream_emit = 0.0
+    last_debug_emit = 0.0
 
     # last-known debug state
-    last_mask = None
     last_cx = None
     last_err = 0.0
     last_area = 0.0
@@ -570,6 +562,11 @@ def run_line_following(cap, pwm, h_center, s_center, v_center):
             time.sleep(0.01)
             continue
 
+        # --- publish TOP stream: raw frame (resized) ---
+        top = cv2.resize(frame, (STREAM_W, STREAM_H), interpolation=cv2.INTER_AREA)
+        last_stream_emit = publish_shared_frame(shared, top, last_stream_emit, STREAM_FPS)
+
+        # --- vision / control (use full-res) ---
         roi, roi_y0 = roi_crop(frame)
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
 
@@ -579,7 +576,10 @@ def run_line_following(cap, pwm, h_center, s_center, v_center):
         rh, rw = mask.shape[:2]
         center_x = rw / 2.0
 
+        status_text = "OK"
+
         if found is None:
+            status_text = "LINE LOST"
             # lost line logic
             if (time.time() - last_seen_line) > LOST_LINE_TIMEOUT_SEC:
                 if LOST_LINE_BRAKE:
@@ -587,17 +587,16 @@ def run_line_following(cap, pwm, h_center, s_center, v_center):
                 pwm.set_pwm_12bit(STEERING_CHANNEL, clamp_steering(STEERING_CENTER_TICKS))
 
             line_ok = False
-            last_mask = mask
+            # keep last_cx/last_err as last-known; set area to 0 for display
+            last_area = 0.0
         else:
             cx, area, contour = found
             last_seen_line = time.time()
             cx_hist.append(cx)
             cx_smooth = float(np.mean(cx_hist))
 
-            # =========================
             # FIX: invert sign to fix reversed left/right
-            # (positive err -> line is left of center -> steer left)
-            # =========================
+            # positive err -> line is left of center -> steer left
             err = (center_x - cx_smooth) / center_x
 
             steer_target = STEERING_CENTER_TICKS + (KP_STEER * err)
@@ -607,31 +606,26 @@ def run_line_following(cap, pwm, h_center, s_center, v_center):
             pwm.set_pwm_12bit(THROTTLE_CHANNEL, clamp_throttle(throttle_cmd))
 
             line_ok = True
-            last_mask = mask
             last_cx = cx_smooth
             last_err = err
             last_area = area
 
-        # Draw debug overlays on a copy (so any other use of frame isn't polluted)
-        dbg = frame.copy()
-
-        # Convert ROI centroid-x to full-frame x (ROI uses full width, so same x scale)
-        cx_frame = None if last_cx is None else float(last_cx)
-
-        draw_debug_overlays(
-            dbg,
-            roi_y0=roi_y0,
-            mask_roi=last_mask,
-            cx_roi=cx_frame,
+        # --- publish BOTTOM stream: debug frame (large text) ---
+        dbg = make_debug_frame(
+            STREAM_W, STREAM_H,
+            status_text=status_text,
+            line_ok=bool(line_ok),
+            roi_y0=int(roi_y0),
+            cx=None if last_cx is None else float(last_cx),
+            area=float(last_area),
             err=float(last_err),
             steer_ticks=float(steer_cmd),
             throttle_ticks=float(throttle_cmd),
-            line_ok=bool(line_ok),
-            area=float(last_area),
+            h_center=int(h_center),
+            s_center=int(s_center),
+            v_center=int(v_center),
         )
-
-        # publish stream (debug frame)
-        last_stream_emit = encode_and_publish_stream(dbg, last_stream_emit)
+        last_debug_emit = publish_shared_frame(shared_debug, dbg, last_debug_emit, DEBUG_STREAM_FPS)
 
         remaining = next_t - time.perf_counter()
         if remaining > 0:
@@ -671,10 +665,25 @@ def main():
     safe_stop(pwm)
     cap = open_camera()
 
-    # Prime stream with a frame
+    # Prime streams with something immediately
     ok, frame = cap.read()
     if ok:
-        encode_and_publish_stream(frame, 0.0)
+        top = cv2.resize(frame, (STREAM_W, STREAM_H), interpolation=cv2.INTER_AREA)
+        shared.update_jpg(cv2.imencode(".jpg", top, [int(cv2.IMWRITE_JPEG_QUALITY), int(STREAM_JPEG_QUALITY)])[1].tobytes())
+
+        dbg = make_debug_frame(
+            STREAM_W, STREAM_H,
+            status_text="WAITING (calibration)",
+            line_ok=False,
+            roi_y0=int(HEIGHT * ROI_Y_START),
+            cx=None,
+            area=0.0,
+            err=0.0,
+            steer_ticks=float(START_STEERING_TICKS),
+            throttle_ticks=float(START_THROTTLE_TICKS),
+            h_center=0, s_center=0, v_center=0,
+        )
+        shared_debug.update_jpg(cv2.imencode(".jpg", dbg, [int(cv2.IMWRITE_JPEG_QUALITY), int(STREAM_JPEG_QUALITY)])[1].tobytes())
 
     h, s, v = calibrate_line_color(cap)
 
