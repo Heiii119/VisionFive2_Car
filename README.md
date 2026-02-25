@@ -37,7 +37,6 @@ sudo apt update
 sudo apt install -y python3-flask python3-opencv python3-pip python3-smbus i2c-tools
 sudo apt install -y v4l-utils libcamera-apps
 sudo apt install -y ffmpeg
-sudo apt install -y python3-opencv
 ```
 
 ### 2) Setup Virtual Environment
@@ -54,7 +53,13 @@ Later, to use again: source car-venv/bin/activate
 python -m pip install smbus2 Adafruit-PCA9685 adafruit-circuitpython-pca9685
 python -m pip install --upgrade pip
 python -m pip install flask flask-socketio eventlet
+sudo apt install -y python3-opencv
 ```
+test if OpenCV is installed correctly:
+```bash
+python3 -c "import cv2; print('cv2', cv2.__version__)"
+```
+
 ### 4) Configure I2C PCA9685 servo board (under venv)
 sudo i2cdetect -y X  (replace X with your bus number)
 ```bash
