@@ -42,7 +42,7 @@ sudo apt install -y ffmpeg
 ### 2) Setup Virtual Environment
 ```bash
 sudo apt install -y python3-venv python3-dev
-python3 -m venv car-venv
+python3 -m venv --system-site-packages car-venv
 source car-venv/bin/activate
 ```
 Later, to use again: source car-venv/bin/activate
