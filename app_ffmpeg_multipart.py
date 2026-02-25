@@ -1,130 +1,179 @@
-from flask import Flask, Response, render_template_string
-import subprocess
+#!/usr/bin/env python3
+import time
+import sys
+import signal
+import threading
 import socket
+from collections import deque
 
+import cv2
+import numpy as np
+from flask import Flask, Response, render_template_string
+
+# =========================
+# Camera config
+# =========================
 DEVICE = "/dev/video4"
+WIDTH = 1280
+HEIGHT = 720
+FPS = 30
 
-# Your camera reports YUYV (uncompressed), so encoding to JPEG costs CPU.
-# Start with 640x480 @ 15fps for better performance on StarFive.
-WIDTH = 640
-HEIGHT = 480
-FPS = 15
+# Stream config (served from the SAME OpenCV capture to avoid "device busy")
+STREAM_W = 640
+STREAM_H = 480
+STREAM_FPS = 15
+STREAM_JPEG_QUALITY = 75  # 0..100 (higher = better quality, more CPU/bandwidth)
 
-PORT = 5000
+FLASK_HOST = "0.0.0.0"
+FLASK_PORT = 9000
 
+# =========================
+# PCA9685 config (as given)
+# =========================
+PCA9685_ADDR = 0x40
+PCA9685_FREQ = 60  # Hz
+I2C_BUS = 0
+DRIVER_PREFER = "smbus2"  # "smbus2", "legacy", or "auto"
+
+THROTTLE_CHANNEL = 0
+STEERING_CHANNEL = 1
+
+THROTTLE_STOPPED_TICKS = 370
+THROTTLE_FORWARD_TICKS = 385
+THROTTLE_REVERSE_TICKS = 330
+
+STEERING_LEFT_TICKS = 280
+STEERING_CENTER_TICKS = 380
+STEERING_RIGHT_TICKS = 480
+
+STEERING_MIN_TICKS = 305
+STEERING_MAX_TICKS = 455
+
+THROTTLE_MIN_TICKS = 280
+THROTTLE_MAX_TICKS = 450
+
+START_THROTTLE_TICKS = THROTTLE_STOPPED_TICKS
+START_STEERING_TICKS = STEERING_CENTER_TICKS
+
+STOP_ON_EXIT = True
+
+# =========================
+# Line-follow tuning
+# =========================
+ROI_Y_START = 0.55
+
+CAL_PATCH_W = 120
+CAL_PATCH_H = 90
+
+H_MARGIN = 12
+S_MIN = 60
+V_MIN = 60
+
+MORPH_K = 5
+MIN_CONTOUR_AREA = 900
+
+CONTROL_HZ = 30.0
+DT = 1.0 / CONTROL_HZ
+
+KP_STEER = 120.0
+STEER_SMOOTH_ALPHA = 0.35
+
+FOLLOW_THROTTLE_TICKS = 382
+
+LOST_LINE_BRAKE = True
+LOST_LINE_TIMEOUT_SEC = 0.6
+
+CENTROID_HISTORY = 5
+
+# Debug overlay options
+SHOW_MASK_PIP = True
+MASK_PIP_SCALE = 0.33  # relative to stream frame width
+MASK_PIP_MARGIN = 10
+
+# =========================
+# Shared-frame streamer (pure OpenCV)
+# =========================
 app = Flask(__name__)
 
 HTML = """
 <!doctype html>
-<title>Webcam Stream</title>
+<title>Line Follow - Live Stream</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
 <style>
-  body { font-family: system-ui, sans-serif; margin: 20px; }
-  img { max-width: 100%; height: auto; border: 1px solid #ccc; }
+  body { font-family: system-ui, sans-serif; margin: 16px; }
+  .wrap { max-width: 980px; margin: 0 auto; }
+  img { width: 100%; height: auto; border: 1px solid #ccc; border-radius: 8px; }
+  code { background: #f6f6f6; padding: 2px 6px; border-radius: 6px; }
+  .row { display: flex; flex-wrap: wrap; gap: 10px; }
+  .pill { display: inline-block; padding: 6px 10px; border: 1px solid #ddd; border-radius: 999px; background: #fafafa; }
 </style>
-<h1>Webcam Stream</h1>
-<p>Device: {{device}} ({{w}}x{{h}} @ {{fps}}fps)</p>
-<img src="/mjpg" />
+<div class="wrap">
+  <h1>Live Camera Stream (Debug)</h1>
+  <div class="row">
+    <span class="pill">Device: <code>{{device}}</code></span>
+    <span class="pill">Stream: {{sw}}×{{sh}} @ {{sfps}} fps</span>
+    <span class="pill">Port: {{port}}</span>
+  </div>
+  <p>Shows ROI, mask preview, centroid, and steering error.</p>
+  <img src="/mjpg" />
+</div>
 """
+
+class SharedFrame:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._jpg = None
+        self._ts = 0.0
+
+    def update_jpg(self, jpg_bytes: bytes):
+        with self._lock:
+            self._jpg = jpg_bytes
+            self._ts = time.time()
+
+    def get_jpg(self):
+        with self._lock:
+            return self._jpg, self._ts
+
+shared = SharedFrame()
 
 def detect_local_ips():
     ips = set()
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        # UDP connect trick: no packets need to be sent to learn outbound IP
         s.connect(("8.8.8.8", 80))
         ips.add(s.getsockname()[0])
         s.close()
     except Exception:
         pass
-
     ips.discard("127.0.0.1")
     return sorted(ips)
 
-def ffmpeg_jpeg_pipe():
-    """
-    Produce a sequence of individual JPEG images to stdout.
-
-    Your webcam node (/dev/video4) exposes 'YUYV' only, so we must:
-    - capture yuyv422 from v4l2
-    - encode to mjpeg in ffmpeg
-    """
-    cmd = [
-        "ffmpeg",
-        "-hide_banner",
-        "-loglevel", "error",
-
-        "-f", "video4linux2",
-        "-input_format", "yuyv422",
-        "-framerate", str(FPS),
-        "-video_size", f"{WIDTH}x{HEIGHT}",
-        "-i", DEVICE,
-
-        "-an",
-
-        # Encode each frame as JPEG (adjust q:v for quality/CPU tradeoff)
-        "-c:v", "mjpeg",
-        "-q:v", "7",
-
-        "-f", "image2pipe",
-        "-vcodec", "mjpeg",
-        "pipe:1",
-    ]
-    return subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        bufsize=0
-    )
-
 def multipart_mjpeg_generator():
-    p = ffmpeg_jpeg_pipe()
     boundary = b"--frame\r\n"
-
-    def read_one_jpeg(stream):
-        # JPEG starts with 0xFFD8 and ends with 0xFFD9
-        start = stream.read(2)
-        if not start:
-            return None
-
-        # Sync to JPEG SOI marker
-        while start != b"\xff\xd8":
-            nxt = stream.read(1)
-            if not nxt:
-                return None
-            start = start[1:] + nxt
-
-        buf = bytearray(start)
-        while True:
-            chunk = stream.read(4096)
-            if not chunk:
-                return None
-            buf.extend(chunk)
-
-            eoi = buf.find(b"\xff\xd9")
-            if eoi != -1:
-                return bytes(buf[: eoi + 2])
-
-    try:
-        while True:
-            jpg = read_one_jpeg(p.stdout)
-            if jpg is None:
-                break
-
-            headers = (
-                boundary +
-                b"Content-Type: image/jpeg\r\n" +
-                f"Content-Length: {len(jpg)}\r\n\r\n".encode()
-            )
-            yield headers + jpg + b"\r\n"
-    finally:
-        try:
-            p.kill()
-        except Exception:
-            pass
+    last_ts = 0.0
+    while True:
+        jpg, ts = shared.get_jpg()
+        if jpg is None or ts == last_ts:
+            time.sleep(0.01)
+            continue
+        last_ts = ts
+        headers = (
+            boundary +
+            b"Content-Type: image/jpeg\r\n" +
+            f"Content-Length: {len(jpg)}\r\n\r\n".encode()
+        )
+        yield headers + jpg + b"\r\n"
 
 @app.get("/")
 def index():
-    return render_template_string(HTML, device=DEVICE, w=WIDTH, h=HEIGHT, fps=FPS)
+    return render_template_string(
+        HTML,
+        device=DEVICE,
+        sw=STREAM_W,
+        sh=STREAM_H,
+        sfps=STREAM_FPS,
+        port=FLASK_PORT,
+    )
 
 @app.get("/mjpg")
 def mjpg():
@@ -133,17 +182,507 @@ def mjpg():
         mimetype="multipart/x-mixed-replace; boundary=frame",
     )
 
-if __name__ == "__main__":
-    print(f'Device: {DEVICE} (YUYV) -> FFmpeg MJPEG -> Browser')
-    print(f'URL pattern: "http://<starfive-ip>:{PORT}/"')
-    print("Tip: Find the board IP by: $ ip a")
+def start_flask_in_thread():
+    def _run():
+        ips = detect_local_ips()
+        print(f"\n[stream] Running on port {FLASK_PORT}. Open:")
+        if ips:
+            for ip in ips:
+                print(f"  http://{ip}:{FLASK_PORT}/")
+        else:
+            print(f"  http://127.0.0.1:{FLASK_PORT}/")
+        app.run(host=FLASK_HOST, port=FLASK_PORT, threaded=True, use_reloader=False)
 
-    ips = detect_local_ips()
-    if ips:
-        print("Detected IP address(es):")
-        for ip in ips:
-            print(f"  http://{ip}:{PORT}/")
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    return t
+
+# =========================
+# PCA9685 driver
+# =========================
+class PCA9685_SMBus2:
+    MODE1 = 0x00
+    MODE2 = 0x01
+    PRESCALE = 0xFE
+    LED0_ON_L = 0x06
+
+    RESTART = 0x80
+    SLEEP = 0x10
+    ALLCALL = 0x01
+    OUTDRV = 0x04
+
+    def __init__(self, busnum, address=0x40, frequency=60):
+        try:
+            from smbus2 import SMBus
+        except Exception as e:
+            raise SystemExit("Missing smbus2. Install with: pip3 install --user smbus2") from e
+
+        self.address = int(address)
+        self._bus = SMBus(int(busnum))
+        self._frequency = None
+
+        self._write8(self.MODE1, self.ALLCALL)
+        self._write8(self.MODE2, self.OUTDRV)
+        time.sleep(0.005)
+
+        mode1 = self._read8(self.MODE1)
+        mode1 = mode1 & ~self.SLEEP
+        self._write8(self.MODE1, mode1)
+        time.sleep(0.005)
+
+        self.set_pwm_freq(frequency)
+
+    def close(self):
+        try:
+            self._bus.close()
+        except Exception:
+            pass
+
+    def _write8(self, reg, val):
+        self._bus.write_byte_data(self.address, reg, val & 0xFF)
+
+    def _read8(self, reg):
+        return self._bus.read_byte_data(self.address, reg) & 0xFF
+
+    def set_pwm_freq(self, freq_hz):
+        osc = 25_000_000.0
+        freq_hz = float(freq_hz)
+        prescaleval = (osc / (4096.0 * freq_hz)) - 1.0
+        prescale = int(round(prescaleval))
+        prescale = max(3, min(255, prescale))
+
+        oldmode = self._read8(self.MODE1)
+        newmode = (oldmode & 0x7F) | self.SLEEP
+        self._write8(self.MODE1, newmode)
+        self._write8(self.PRESCALE, prescale)
+        self._write8(self.MODE1, oldmode)
+        time.sleep(0.005)
+        self._write8(self.MODE1, oldmode | self.RESTART)
+        self._frequency = freq_hz
+
+    def set_pwm(self, channel, on, off):
+        ch = int(channel)
+        on = int(on) & 0x0FFF
+        off = int(off) & 0x0FFF
+        base = self.LED0_ON_L + 4 * ch
+        self._write8(base + 0, on & 0xFF)
+        self._write8(base + 1, (on >> 8) & 0xFF)
+        self._write8(base + 2, off & 0xFF)
+        self._write8(base + 3, (off >> 8) & 0xFF)
+
+    def set_pwm_12bit(self, channel, value_12bit):
+        v = max(0, min(4095, int(value_12bit)))
+        self.set_pwm(channel, 0, v)
+
+class PCA9685Driver:
+    def __init__(self, address=0x40, busnum=1, frequency=60, prefer="smbus2"):
+        self._mode = None
+        self._drv = None
+        smbus2_err = None
+
+        if prefer in ("smbus2", "auto"):
+            try:
+                self._drv = PCA9685_SMBus2(busnum=busnum, address=address, frequency=frequency)
+                self._mode = "smbus2"
+                return
+            except Exception as e:
+                if prefer == "smbus2":
+                    raise
+                smbus2_err = e
+
+        try:
+            import Adafruit_PCA9685 as LegacyPCA9685
+            self._drv = LegacyPCA9685.PCA9685(address=address, busnum=busnum)
+            self._drv.set_pwm_freq(frequency)
+            self._mode = "legacy"
+        except Exception as e:
+            raise SystemExit(
+                "Could not initialize PCA9685.\n"
+                "Tried:\n"
+                f"  - smbus2 direct driver: {smbus2_err}\n"
+                f"  - Adafruit_PCA9685: {e}\n\n"
+                "Fix:\n"
+                "  pip3 install --user smbus2\n"
+                "and ensure /dev/i2c-<bus> exists and i2cdetect shows 0x40.\n"
+            )
+
+    def close(self):
+        if hasattr(self._drv, "close"):
+            self._drv.close()
+
+    def set_pwm_12bit(self, channel, value_12bit):
+        if self._mode == "legacy":
+            v = max(0, min(4095, int(value_12bit)))
+            self._drv.set_pwm(channel, 0, v)
+        else:
+            self._drv.set_pwm_12bit(channel, value_12bit)
+
+# =========================
+# Helpers
+# =========================
+def clamp(v, lo, hi):
+    return max(lo, min(hi, int(v)))
+
+def clamp_throttle(t):
+    return clamp(t, THROTTLE_MIN_TICKS, THROTTLE_MAX_TICKS)
+
+def clamp_steering(s):
+    return clamp(s, STEERING_MIN_TICKS, STEERING_MAX_TICKS)
+
+def safe_stop(pwm: PCA9685Driver):
+    try:
+        pwm.set_pwm_12bit(THROTTLE_CHANNEL, clamp_throttle(THROTTLE_STOPPED_TICKS))
+        pwm.set_pwm_12bit(STEERING_CHANNEL, clamp_steering(STEERING_CENTER_TICKS))
+    except Exception:
+        pass
+
+def open_camera():
+    cap = cv2.VideoCapture(DEVICE, cv2.CAP_V4L2)
+    if not cap.isOpened():
+        raise SystemExit(f"Could not open camera {DEVICE}")
+
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, WIDTH)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, HEIGHT)
+    cap.set(cv2.CAP_PROP_FPS, FPS)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    return cap
+
+def roi_crop(frame_bgr):
+    h, w = frame_bgr.shape[:2]
+    y0 = int(h * ROI_Y_START)
+    return frame_bgr[y0:h, 0:w], y0
+
+def circular_hue_bounds(h_center, margin):
+    lo = int(h_center - margin)
+    hi = int(h_center + margin)
+    if lo < 0:
+        return [(0, hi), (180 + lo, 179)]
+    if hi > 179:
+        return [(0, hi - 180), (lo, 179)]
+    return [(lo, hi)]
+
+def build_line_mask(hsv_roi, h_center, s_center, v_center):
+    s_lo = max(S_MIN, int(0.5 * s_center))
+    v_lo = max(V_MIN, int(0.5 * v_center))
+
+    ranges = circular_hue_bounds(h_center, H_MARGIN)
+    mask = None
+    for (h_lo, h_hi) in ranges:
+        lower = np.array([h_lo, s_lo, v_lo], dtype=np.uint8)
+        upper = np.array([h_hi, 255, 255], dtype=np.uint8)
+        m = cv2.inRange(hsv_roi, lower, upper)
+        mask = m if mask is None else cv2.bitwise_or(mask, m)
+
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (MORPH_K, MORPH_K))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k, iterations=1)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k, iterations=2)
+    return mask
+
+def find_line_centroid(mask):
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+    best = max(contours, key=cv2.contourArea)
+    area = float(cv2.contourArea(best))
+    if area < MIN_CONTOUR_AREA:
+        return None
+    m = cv2.moments(best)
+    if m["m00"] <= 1e-6:
+        return None
+    cx = m["m10"] / m["m00"]
+    return (cx, area, best)
+
+def calibrate_line_color(cap):
+    print("\nCalibration: place the line under the center of the camera view.")
+    print("Hold still… capturing samples (about 1.5s).")
+
+    samples_h, samples_s, samples_v = [], [], []
+
+    t_end = time.time() + 1.5
+    while time.time() < t_end:
+        ok, frame = cap.read()
+        if not ok:
+            continue
+
+        roi, _ = roi_crop(frame)
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+        rh, rw = hsv.shape[:2]
+
+        cx = rw // 2
+        cy = rh // 2
+        x0 = max(0, cx - CAL_PATCH_W // 2)
+        y0 = max(0, cy - CAL_PATCH_H // 2)
+        x1 = min(rw, cx + CAL_PATCH_W // 2)
+        y1 = min(rh, cy + CAL_PATCH_H // 2)
+
+        patch = hsv[y0:y1, x0:x1]
+        med = np.median(patch.reshape(-1, 3), axis=0)
+        samples_h.append(med[0])
+        samples_s.append(med[1])
+        samples_v.append(med[2])
+
+        time.sleep(0.03)
+
+    h = int(np.median(np.array(samples_h)))
+    s = int(np.median(np.array(samples_s)))
+    v = int(np.median(np.array(samples_v)))
+
+    print(f"Calibrated line HSV center: H={h}, S={s}, V={v}")
+    return h, s, v
+
+def prompt_start():
+    ans = input("\nPress (y) to start line following: ").strip().lower()
+    return ans == "y"
+
+def draw_debug_overlays(
+    frame_bgr,
+    roi_y0,
+    mask_roi,
+    cx_roi,
+    err,
+    steer_ticks,
+    throttle_ticks,
+    line_ok,
+    area=0.0,
+):
+    """
+    Draws overlays directly on the full frame (BGR).
+    - ROI rectangle boundary
+    - centroid marker + centerline
+    - steering error text
+    - mask PIP
+    """
+    h, w = frame_bgr.shape[:2]
+
+    # ROI box
+    cv2.rectangle(frame_bgr, (0, roi_y0), (w - 1, h - 1), (0, 255, 255), 2)
+    cv2.putText(frame_bgr, "ROI", (10, roi_y0 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+
+    # Center vertical line (in ROI region)
+    cx_frame_center = w // 2
+    cv2.line(frame_bgr, (cx_frame_center, roi_y0), (cx_frame_center, h - 1), (255, 255, 0), 2)
+
+    # Detected centroid (convert ROI x to frame x, ROI y is mid of ROI just for marker)
+    if line_ok and cx_roi is not None:
+        x_line = int(round(cx_roi))
+        y_marker = int(roi_y0 + (h - roi_y0) * 0.5)
+        cv2.circle(frame_bgr, (x_line, y_marker), 10, (0, 0, 255), -1)
+        cv2.line(frame_bgr, (x_line, roi_y0), (x_line, h - 1), (0, 0, 255), 2)
+        cv2.putText(
+            frame_bgr,
+            f"line_x={x_line}px area={area:.0f}",
+            (10, roi_y0 + 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            (0, 0, 255),
+            2,
+        )
     else:
-        print("Could not auto-detect a non-loopback IP. Use: ip a")
+        cv2.putText(
+            frame_bgr,
+            "LINE LOST",
+            (10, roi_y0 + 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (0, 0, 255),
+            2,
+        )
 
-    app.run(host="0.0.0.0", port=PORT, threaded=True)
+    # Control text
+    cv2.putText(
+        frame_bgr,
+        f"err={err:+.3f} steer={int(steer_ticks)} thr={int(throttle_ticks)}",
+        (10, 30),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (255, 255, 255),
+        2,
+    )
+
+    # Mask PIP
+    if SHOW_MASK_PIP and mask_roi is not None:
+        mask_rgb = cv2.cvtColor(mask_roi, cv2.COLOR_GRAY2BGR)
+
+        pip_w = int(STREAM_W * MASK_PIP_SCALE)
+        # maintain mask aspect
+        mh, mw = mask_rgb.shape[:2]
+        pip_h = int(pip_w * (mh / float(mw)))
+        pip = cv2.resize(mask_rgb, (pip_w, pip_h), interpolation=cv2.INTER_NEAREST)
+
+        x0 = w - pip_w - MASK_PIP_MARGIN
+        y0 = MASK_PIP_MARGIN
+        x1 = x0 + pip_w
+        y1 = y0 + pip_h
+
+        # background box
+        cv2.rectangle(frame_bgr, (x0 - 2, y0 - 22), (x1 + 2, y1 + 2), (0, 0, 0), -1)
+        cv2.putText(frame_bgr, "mask", (x0, y0 - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+
+        frame_bgr[y0:y1, x0:x1] = pip
+
+    return frame_bgr
+
+def encode_and_publish_stream(frame_bgr, last_emit_t):
+    now = time.time()
+    if (now - last_emit_t) < (1.0 / float(STREAM_FPS)):
+        return last_emit_t
+
+    small = cv2.resize(frame_bgr, (STREAM_W, STREAM_H), interpolation=cv2.INTER_AREA)
+    ok, jpg = cv2.imencode(
+        ".jpg",
+        small,
+        [int(cv2.IMWRITE_JPEG_QUALITY), int(STREAM_JPEG_QUALITY)]
+    )
+    if ok:
+        shared.update_jpg(jpg.tobytes())
+        return now
+    return last_emit_t
+
+# =========================
+# Main line-follow loop
+# =========================
+def run_line_following(cap, pwm, h_center, s_center, v_center):
+    print("\nLine following started. Press Ctrl+C to stop.\n")
+
+    steer_cmd = float(STEERING_CENTER_TICKS)
+    throttle_cmd = float(clamp_throttle(FOLLOW_THROTTLE_TICKS))
+    pwm.set_pwm_12bit(STEERING_CHANNEL, clamp_steering(steer_cmd))
+    pwm.set_pwm_12bit(THROTTLE_CHANNEL, clamp_throttle(throttle_cmd))
+
+    last_seen_line = time.time()
+    cx_hist = deque(maxlen=CENTROID_HISTORY)
+    next_t = time.perf_counter()
+
+    last_stream_emit = 0.0
+
+    # last-known debug state
+    last_mask = None
+    last_cx = None
+    last_err = 0.0
+    last_area = 0.0
+    line_ok = False
+
+    while True:
+        next_t += DT
+
+        ok, frame = cap.read()
+        if not ok:
+            time.sleep(0.01)
+            continue
+
+        roi, roi_y0 = roi_crop(frame)
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+
+        mask = build_line_mask(hsv, h_center, s_center, v_center)
+        found = find_line_centroid(mask)
+
+        rh, rw = mask.shape[:2]
+        center_x = rw / 2.0
+
+        if found is None:
+            # lost line logic
+            if (time.time() - last_seen_line) > LOST_LINE_TIMEOUT_SEC:
+                if LOST_LINE_BRAKE:
+                    pwm.set_pwm_12bit(THROTTLE_CHANNEL, clamp_throttle(THROTTLE_STOPPED_TICKS))
+                pwm.set_pwm_12bit(STEERING_CHANNEL, clamp_steering(STEERING_CENTER_TICKS))
+
+            line_ok = False
+            last_mask = mask
+        else:
+            cx, area, contour = found
+            last_seen_line = time.time()
+            cx_hist.append(cx)
+            cx_smooth = float(np.mean(cx_hist))
+
+            # =========================
+            # FIX: invert sign to fix reversed left/right
+            # (positive err -> line is left of center -> steer left)
+            # =========================
+            err = (center_x - cx_smooth) / center_x
+
+            steer_target = STEERING_CENTER_TICKS + (KP_STEER * err)
+            steer_cmd = (1.0 - STEER_SMOOTH_ALPHA) * steer_cmd + STEER_SMOOTH_ALPHA * steer_target
+
+            pwm.set_pwm_12bit(STEERING_CHANNEL, clamp_steering(steer_cmd))
+            pwm.set_pwm_12bit(THROTTLE_CHANNEL, clamp_throttle(throttle_cmd))
+
+            line_ok = True
+            last_mask = mask
+            last_cx = cx_smooth
+            last_err = err
+            last_area = area
+
+        # Draw debug overlays on a copy (so any other use of frame isn't polluted)
+        dbg = frame.copy()
+
+        # Convert ROI centroid-x to full-frame x (ROI uses full width, so same x scale)
+        cx_frame = None if last_cx is None else float(last_cx)
+
+        draw_debug_overlays(
+            dbg,
+            roi_y0=roi_y0,
+            mask_roi=last_mask,
+            cx_roi=cx_frame,
+            err=float(last_err),
+            steer_ticks=float(steer_cmd),
+            throttle_ticks=float(throttle_cmd),
+            line_ok=bool(line_ok),
+            area=float(last_area),
+        )
+
+        # publish stream (debug frame)
+        last_stream_emit = encode_and_publish_stream(dbg, last_stream_emit)
+
+        remaining = next_t - time.perf_counter()
+        if remaining > 0:
+            time.sleep(remaining)
+        else:
+            next_t = time.perf_counter()
+
+def main():
+    start_flask_in_thread()
+
+    pwm = PCA9685Driver(
+        address=PCA9685_ADDR,
+        busnum=I2C_BUS,
+        frequency=PCA9685_FREQ,
+        prefer=DRIVER_PREFER,
+    )
+
+    cap = None
+
+    def handle_exit(sig=None, frame=None):
+        if STOP_ON_EXIT:
+            safe_stop(pwm)
+        try:
+            if cap is not None:
+                cap.release()
+        except Exception:
+            pass
+        try:
+            pwm.close()
+        except Exception:
+            pass
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, handle_exit)
+    signal.signal(signal.SIGTERM, handle_exit)
+
+    safe_stop(pwm)
+    cap = open_camera()
+
+    # Prime stream with a frame
+    ok, frame = cap.read()
+    if ok:
+        encode_and_publish_stream(frame, 0.0)
+
+    h, s, v = calibrate_line_color(cap)
+
+    if not prompt_start():
+        print("Not starting. Exiting.")
+        handle_exit()
+
+    run_line_following(cap, pwm, h, s, v)
+
+if __name__ == "__main__":
+    main()
