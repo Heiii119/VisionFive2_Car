@@ -132,43 +132,72 @@ HTML = """
 <title>Line Follow</title>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <style>
-  body { font-family: system-ui, sans-serif; margin: 16px; }
-  .wrap { max-width: 980px; margin: 0 auto; }
+  body { font-family: system-ui, sans-serif; margin: 0; background:#fff; }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 12px 12px 110px; } /* bottom padding for bar */
   img { width: 100%; height: auto; border: 1px solid #ccc; border-radius: 10px; display:block; }
-  .row { display:flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 12px; }
+
+  /* Bottom fixed control bar */
+  .bottomBar {
+    position: fixed;
+    left: 0; right: 0; bottom: 0;
+    background: rgba(255,255,255,0.95);
+    backdrop-filter: blur(6px);
+    border-top: 1px solid #ddd;
+    padding: 10px 12px;
+    z-index: 9999;
+  }
+
+  .row {
+    max-width: 980px;
+    margin: 0 auto;
+    display:flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .leftGroup { display:flex; gap:10px; align-items:center; flex-wrap: wrap; }
+  .rightGroup { display:flex; gap:10px; align-items:center; flex-wrap: wrap; }
+
   .pill { display:inline-block; padding: 6px 10px; border:1px solid #ddd; border-radius: 999px; background:#fafafa; }
   code { background: #f6f6f6; padding: 2px 6px; border-radius: 6px; }
+
   button {
-    border: 0; border-radius: 12px; padding: 12px 16px;
-    font-weight: 800; cursor: pointer;
+    border: 0; border-radius: 12px; padding: 14px 18px;
+    font-weight: 900; cursor: pointer;
   }
   .stop { background: #b00020; color: #fff; }
   .rel  { background: #1b5e20; color: #fff; }
-  .small { font-size: 12px; color: #555; }
+  .small { font-size: 12px; color: #555; margin-top: 6px; }
 </style>
 
 <div class="wrap">
-  <h1>Live Stream</h1>
-
-  <div class="row">
-    <span class="pill">Stream: <code>/mjpg</code></span>
-
-    <form method="POST" action="/estop">
-      <button class="stop" type="submit">EMERGENCY STOP</button>
-    </form>
-
-    <form method="POST" action="/release">
-      <button class="rel" type="submit">Release</button>
-    </form>
-
-    <span class="pill" id="estopPill">E-STOP: …</span>
-  </div>
-
+  <h1 style="margin: 8px 0 12px;">Live Stream</h1>
+  <img src="/mjpg" />
   <div class="small">
     Tip: If you lose Wi‑Fi, this button can’t help. Consider adding a physical kill switch too.
   </div>
+</div>
 
-  <img src="/mjpg" />
+<!-- Fixed bottom controls -->
+<div class="bottomBar">
+  <div class="row">
+    <div class="leftGroup">
+      <span class="pill">Stream: <code>/mjpg</code></span>
+      <span class="pill" id="estopPill">E-STOP: …</span>
+    </div>
+
+    <div class="rightGroup">
+      <form method="POST" action="/estop" style="margin:0;">
+        <button class="stop" type="submit">EMERGENCY STOP</button>
+      </form>
+
+      <form method="POST" action="/release" style="margin:0;">
+        <button class="rel" type="submit">Release</button>
+      </form>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -186,9 +215,7 @@ HTML = """
         pill.style.background = "#eaffea";
         pill.style.borderColor = "#1b5e20";
       }
-    } catch (e) {
-      // ignore
-    }
+    } catch (e) {}
   }
   poll();
   setInterval(poll, 500);
