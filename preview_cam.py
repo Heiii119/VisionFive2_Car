@@ -1,9 +1,17 @@
 import cv2
 
 def main():
-    cap = cv2.VideoCapture(0)  # change to /dev/video1 etc if needed
+    dev = "/dev/video4"   # try "/dev/video5" if needed
+    cap = cv2.VideoCapture(dev, cv2.CAP_V4L2)
+
     if not cap.isOpened():
-        raise RuntimeError("Cannot open webcam. Try another index or check /dev/video*")
+        raise RuntimeError(f"Cannot open {dev}. Try /dev/video5 or check v4l2-ctl formats.")
+
+    # Many webcams work best with MJPG on small boards
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    cap.set(cv2.CAP_PROP_FPS, 30)
 
     while True:
         ok, frame = cap.read()
@@ -12,7 +20,7 @@ def main():
             break
 
         cv2.imshow("USB Webcam Preview", frame)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
+        if cv2.waitKey(1) & 0xFF == ord("q"):
             break
 
     cap.release()
