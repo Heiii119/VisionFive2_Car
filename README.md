@@ -121,6 +121,11 @@ libcamera-hello --list-cameras
 libcamera-hello -t 0
 libcamera-hello -o test.jpg
 ```
+#### 4) quick check with preview window
+```bash
+sudo apt-get install guvcview
+guvcview
+```
 ### 4.2 check live streaming 
 #### 0) confirm packages
 ```bash
