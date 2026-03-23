@@ -135,3 +135,18 @@ python app_ffmpeg_multipart.py
 http://<board-ip>:5000
 ```
 ## Step 5: fpv driving
+
+## Step 6: AI module
+### 6.0 Preperation: https://doc.rvspace.org/VisionFive2/Application_Notes/AI_Kit/VisionFive_2/complie_ai.html
+Admendment before compilation:
+1. 在tappas/core/requirements/gstreamer_requirements.txt 文件中把pandas 版本由1.5.2 改为：2.3.3
+2. 以普通用户user 编译安装Tappas, 命令：$ ./install.sh --skip-hailort --target-platform vf2
+
+### 6.1 start environment 
+```bash
+source /home/user/.hailo/tappas/tappas_env
+```
+### 6.2 start 
+```bash
+su -
+```
