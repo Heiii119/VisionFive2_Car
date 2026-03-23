@@ -123,9 +123,15 @@ libcamera-hello -o test.jpg
 ```
 #### 4) quick check with preview window
 ```bash
-sudo apt-get install guvcview
-guvcview
+sudo apt-get install cheese
+cheese
 ```
+#### 4) quick check with preview window from V4L2 devices
+```bash
+sudo apt-get install mpv
+mpv /dev/video4
+```
+
 ### 4.2 check live streaming 
 #### 0) confirm packages
 ```bash
