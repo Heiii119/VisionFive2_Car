@@ -129,7 +129,7 @@ cheese
 #### 5) get the webcam preview window
 ```bash
 cd VisionFive2_Car
-python3 webcam_preview.py --device 0
+python3 preview_cam.py 
 ```
 
 ### 4.2 check live streaming 
