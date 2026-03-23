@@ -134,7 +134,7 @@ python -c "import flask; print(flask.__version__)"
 ```
 #### 1) run the program on the board
 ```bash
-python app_ffmpeg_multipart.py
+python ffmpeg_streaming.py
 ```
 #### 2) connect a phone/tablet to the same network as the board and go to
 ```bash
