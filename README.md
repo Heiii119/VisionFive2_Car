@@ -127,6 +127,12 @@ sudo apt-get install cheese
 cheese
 ```
 #### 5) get the webcam preview window
+checking:
+```bash
+sudo apt install -y v4l-utils
+v4l2-ctl -d /dev/video4 --list-formats-ext
+```
+
 ```bash
 cd VisionFive2_Car
 python3 preview_cam.py 
