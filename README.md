@@ -121,15 +121,15 @@ libcamera-hello --list-cameras
 libcamera-hello -t 0
 libcamera-hello -o test.jpg
 ```
-#### 4) quick check with preview window
+#### 4) quick check with preview window (with a display)
 ```bash
 sudo apt-get install cheese
 cheese
 ```
-#### 4) quick check with preview window from V4L2 devices
+#### 5) get the webcam preview window
 ```bash
-sudo apt-get install mpv
-mpv /dev/video4
+cd VisionFive2_Car
+python3 webcam_preview.py --device 0
 ```
 
 ### 4.2 check live streaming 
