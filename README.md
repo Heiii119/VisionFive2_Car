@@ -1,5 +1,9 @@
 # VisionFive2_Car
 AI RC car on VisionFive 2 Lite
+| 區段 | 課次 | 主題 |
+|------|------|------|
+| Python 基礎 | 第 1–6 課 | 見各課 `README.md` |
+| AI / 視覺 | 第 7–12 課 | 含第 8 課物件追蹤實作 |
 - github: https://github.com/starfive-tech/VisionFive2
 - guild: https://doc-en.rvspace.org/VisionFive2Lite/VisionFive2LiteQSG/
 #### Installing the StarFive Debian image: 
