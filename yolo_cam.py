@@ -311,7 +311,8 @@ def main():
             cv2.destroyAllWindows()
 
 if __name__ == "__main__":
-    main()    if cap.isOpened():
+    main()    
+    if cap.isOpened():
         return cap
 
     # Fallback: V4L2 (may or may not honor MJPG)
