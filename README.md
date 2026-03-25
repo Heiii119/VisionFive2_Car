@@ -165,17 +165,34 @@ kill -9 <PID>
 
 ## Step 9: Autopilot
 
+## yolo 
+#### 1) install yolo on computer:
+```bash
+git clone https://github.com/ultralytics/yolov5
+cd yolov5
+pip install -r requirements.txt
+python export.py --weights yolov5n.pt --include onnx --img 640 --batch 1 --opset 11 --simplify
+```
+#### 2) transfer the file to the board
+```bash
+scp yolov5n_cv.onnx user@<board-ip>:~/VisionFive2_Car/
+```
+#### 3) run the demo
+```bash
+python3 yolo_cam.py
+```
+
 ## Step 777: AI module (for Starfive AI Module)
 ### 6.0 Preperation: https://doc.rvspace.org/VisionFive2/Application_Notes/AI_Kit/VisionFive_2/complie_ai.html
 Admendment before compilation:
 1. 在tappas/core/requirements/gstreamer_requirements.txt 文件中把pandas 版本由1.5.2 改为：2.3.3
 2. 以普通用户user 编译安装Tappas, 命令：$ ./install.sh --skip-hailort --target-platform vf2
 
-### 6.1 start environment 
+#### 1) start environment 
 ```bash
 source /home/user/.hailo/tappas/tappas_env
 ```
-### 6.2 start 
+#### 2) start 
 ```bash
 su -
 ```
