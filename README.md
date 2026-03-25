@@ -2,8 +2,16 @@
 AI RC car on VisionFive 2 Lite
 | 區段 | 課次 | 主題 |
 |------|------|------|
-| Python 基礎 | 第 1–6 課 | 見各課 `README.md` |
+| Python 基礎 | 第 2 課 | ssh connection |
+| Python 基礎 | 第 3 課 | package installing and enviroment set up |
+| Python 基礎 | 第 4 課 | pwm |
+| Python 基礎 | 第 5 課 | camera |
+| Python 基礎 | 第 6 課 | fpv driving |
+| Python 基礎 | 第 7 課 | line following |
+| Python 基礎 | 第 8 課 | training |
+| Python 基礎 | 第 9 課 | autopilot |
 | AI / 視覺 | 第 7–12 課 | 含第 8 課物件追蹤實作 |
+
 - github: https://github.com/starfive-tech/VisionFive2
 - guild: https://doc-en.rvspace.org/VisionFive2Lite/VisionFive2LiteQSG/
 #### Installing the StarFive Debian image: 
@@ -75,14 +83,14 @@ sudo i2cdetect -y 0
 
 
 
-## Step 3: PWM value
+## Step 4: PWM value
 - to check the motor and servo of the car
 - find the range of throttle and steering
 ```bash
 python3 pwm.py
 ```
 
-## Step 4: camera check
+## Step 5: camera check
 ### 4.1 quick check
 #### 1) check the camera device: Camera (USB Webcam)
 ```bash
@@ -144,9 +152,20 @@ python ffmpeg_streaming.py
 ```bash
 http://<board-ip>:5000
 ```
-## Step 5: fpv driving
+#### *) if the port is already in use
+```bash
+sudo ss -tlnp | grep :[port_number]
+kill -9 <PID>
+```
+## Step 6: fpv driving
 
-## Step 6: AI module
+## Step 7: line following
+
+## Step 8: training your AI image regconition model with teachable machine
+
+## Step 9: Autopilot
+
+## Step 777: AI module (for Starfive AI Module)
 ### 6.0 Preperation: https://doc.rvspace.org/VisionFive2/Application_Notes/AI_Kit/VisionFive_2/complie_ai.html
 Admendment before compilation:
 1. 在tappas/core/requirements/gstreamer_requirements.txt 文件中把pandas 版本由1.5.2 改为：2.3.3
