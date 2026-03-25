@@ -5,10 +5,15 @@
 # but it uses TICKS everywhere (0..4095) instead of microseconds.
 # No argparse / no flags: all config is inside this file.
 
+#!/usr/bin/env python3
+# vf2_pwm_tuner_ticks.py
+#
+# Curses PWM tuner for PCA9685 using TICKS (0..4095).
+# Fix: clean Ctrl+C handling (no double curses.endwin).
+
 import time
 import curses
 import signal
-import sys
 
 # =========================
 # USER CONFIG (edit here)
@@ -27,10 +32,10 @@ THROTTLE_FORWARD_TICKS = 405
 THROTTLE_REVERSE_TICKS = 315
 
 STEERING_LEFT_TICKS   = 280
-STEERING_CENTER_TICKS = 380  # usually midpoint of left/right; set as you like
+STEERING_CENTER_TICKS = 380
 STEERING_RIGHT_TICKS  = 480
 
-# --- NEW: steering safety limits (ticks) ---
+# steering safety limits (ticks)
 STEERING_MIN_TICKS = 305
 STEERING_MAX_TICKS = 480
 
@@ -46,15 +51,12 @@ BIG_STEP = 10
 STEERING_STEP = 25
 UI_FPS = 30.0
 
-
 def ticks_to_us(ticks, freq):
     period_us = 1_000_000.0 / float(freq)
     return int(round((int(ticks) / 4095.0) * period_us))
 
-
 def ticks_to_duty_pct(ticks):
     return (max(0, min(4095, int(ticks))) / 4095.0) * 100.0
-
 
 class PCA9685_SMBus2:
     MODE1 = 0x00
@@ -148,12 +150,12 @@ class PCA9685_SMBus2:
         v = max(0, min(4095, int(value_12bit)))
         self.set_pwm(channel, 0, v)
 
-
 class PCA9685Driver:
     def __init__(self, address=0x40, busnum=1, frequency=60, prefer="smbus2"):
         self._mode = None
         self._drv = None
 
+        smbus2_err = None
         if prefer in ("smbus2", "auto"):
             try:
                 self._drv = PCA9685_SMBus2(busnum=busnum, address=address, frequency=frequency)
@@ -163,8 +165,6 @@ class PCA9685Driver:
                 if prefer == "smbus2":
                     raise
                 smbus2_err = e
-        else:
-            smbus2_err = None
 
         try:
             import Adafruit_PCA9685 as LegacyPCA9685
@@ -184,7 +184,9 @@ class PCA9685Driver:
 
     @property
     def frequency(self):
-        return self._drv.frequency if self._mode == "smbus2" else getattr(self._drv, "frequency", PCA9685_FREQ)
+        if self._mode == "smbus2":
+            return self._drv.frequency
+        return getattr(self._drv, "frequency", PCA9685_FREQ)
 
     def close(self):
         if hasattr(self._drv, "close"):
@@ -200,13 +202,15 @@ class PCA9685Driver:
         else:
             self._drv.set_pwm_12bit(channel, value_12bit)
 
-
 def prompt_input(stdscr, row, col, prompt):
     stdscr.addstr(row, col, " " * 120)
     stdscr.addstr(row, col, prompt)
     stdscr.refresh()
     curses.echo()
-    curses.curs_set(1)
+    try:
+        curses.curs_set(1)
+    except Exception:
+        pass
     try:
         s = stdscr.getstr(row, col + len(prompt), 30)
         try:
@@ -215,8 +219,10 @@ def prompt_input(stdscr, row, col, prompt):
             return ""
     finally:
         curses.noecho()
-        curses.curs_set(0)
-
+        try:
+            curses.curs_set(0)
+        except Exception:
+            pass
 
 def draw_help(stdscr):
     stdscr.addstr(0, 0, "VF2 PWM Tuner (PCA9685)  [TICKS mode 0..4095]")
@@ -229,18 +235,19 @@ def draw_help(stdscr):
     stdscr.addstr(7, 2, "c               = steering -> CENTER preset (ticks)")
     stdscr.addstr(8, 2, "i               = set ticks (0..4095) for selected channel")
     stdscr.addstr(9, 2, "f               = change PCA9685 frequency (Hz)")
-    stdscr.addstr(10,2, "TAB             = switch selected channel (Throttle/Steering)")
-    stdscr.addstr(11,2, "q               = quit")
-    stdscr.addstr(13,0, "Status:")
+    stdscr.addstr(10, 2, "TAB             = switch selected channel (Throttle/Steering)")
+    stdscr.addstr(11, 2, "q               = quit")
+    stdscr.addstr(13, 0, "Status:")
     stdscr.refresh()
 
-
 def run(stdscr):
-    curses.noecho()
-    curses.cbreak()
+    # wrapper() already sets up/tears down terminal modes safely.
     stdscr.keypad(True)
     stdscr.nodelay(True)
-    curses.curs_set(0)
+    try:
+        curses.curs_set(0)
+    except Exception:
+        pass
 
     pwm = PCA9685Driver(
         address=PCA9685_ADDR,
@@ -258,10 +265,11 @@ def run(stdscr):
     items = ["throttle", "steering"]
     sel_idx = 0
 
+    quit_flag = False
+
     def clamp12(v):
         return max(0, min(4095, int(v)))
 
-    # --- NEW: steering clamp using your min/max ---
     def clamp_steering(v):
         return max(STEERING_MIN_TICKS, min(STEERING_MAX_TICKS, int(v)))
 
@@ -305,14 +313,12 @@ def run(stdscr):
         except Exception:
             pass
 
+    # SIGINT: do NOT touch curses here; just request quit.
     def sigint_handler(signum, frame):
-        safe_exit()
-        curses.nocbreak()
-        stdscr.keypad(False)
-        curses.echo()
-        curses.endwin()
-        sys.exit(0)
+        nonlocal quit_flag
+        quit_flag = True
 
+    old_handler = signal.getsignal(signal.SIGINT)
     signal.signal(signal.SIGINT, sigint_handler)
 
     # Apply startup outputs (clamp steering on startup too)
@@ -324,13 +330,13 @@ def run(stdscr):
     last_ui = 0.0
 
     try:
-        while True:
+        while not quit_flag:
             ch = stdscr.getch()
             if ch != -1:
                 if ch in (ord('q'), ord('Q')):
-                    return
+                    break
 
-                elif ch in (curses.KEY_BTAB, 9):
+                elif ch in (curses.KEY_BTAB, 9):  # Shift+TAB or TAB
                     sel_idx = (sel_idx + 1) % len(items)
 
                 elif ch in (curses.KEY_UP, ord('w')):
@@ -372,7 +378,6 @@ def run(stdscr):
                         hz = int(float(s))
                         hz = max(24, min(1526, hz))
                         pwm.set_pwm_freq(hz)
-                        # re-apply current ticks
                         pwm.set_pwm_12bit(channels["throttle"], values["throttle"])
                         pwm.set_pwm_12bit(channels["steering"], values["steering"])
                     except Exception:
@@ -393,16 +398,15 @@ def run(stdscr):
             time.sleep(1.0 / UI_FPS)
 
     finally:
+        # restore original SIGINT handler
+        try:
+            signal.signal(signal.SIGINT, old_handler)
+        except Exception:
+            pass
         safe_exit()
-        curses.nocbreak()
-        stdscr.keypad(False)
-        curses.echo()
-        curses.endwin()
-
 
 def main():
-    curses.wrapper(lambda stdscr: run(stdscr))
-
+    curses.wrapper(run)
 
 if __name__ == "__main__":
     main()
