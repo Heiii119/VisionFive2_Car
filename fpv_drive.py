@@ -9,9 +9,9 @@ import threading
 # Camera / streaming config
 # -------------------------
 DEVICE = "/dev/video4"
-WIDTH = 640
-HEIGHT = 480
-FPS = 15            # camera capture FPS
+WIDTH = 320
+HEIGHT = 240
+FPS = 10            # camera capture FPS
 PORT = 6060
 
 app = Flask(__name__)
