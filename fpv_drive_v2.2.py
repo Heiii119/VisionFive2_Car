@@ -87,6 +87,19 @@ HTML = """<!doctype html>
   <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
   <title>META DOT FPV Drive</title>
   <style>
+    /* Prevent iOS long-press text selection / callout */
+    html, body {
+      -webkit-user-select: none;
+      user-select: none;
+      -webkit-touch-callout: none; /* disables Copy/Look Up bubble in many cases */
+    }
+
+    /* Also apply to controls explicitly */
+    button, .btn, .pad, .hint, header, .meta, .status {
+      -webkit-user-select: none;
+      user-select: none;
+      -webkit-touch-callout: none;
+    }
     :root { --bg:#0b0f14; --panel:rgba(255,255,255,0.08); --panel2:rgba(0,0,0,0.35);
       --text:#e8eef7; --muted:rgba(232,238,247,0.75); --btn:rgba(255,255,255,0.10);
       --btnActive:rgba(76,175,80,0.35); --btnBrake:rgba(244,67,54,0.40); --stroke:rgba(255,255,255,0.14); }
