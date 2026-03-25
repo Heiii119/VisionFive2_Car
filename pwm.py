@@ -4,10 +4,6 @@
 # Same layout/behavior as your OLD working curses program,
 # but it uses TICKS everywhere (0..4095) instead of microseconds.
 # No argparse / no flags: all config is inside this file.
-
-#!/usr/bin/env python3
-# vf2_pwm_tuner_ticks.py
-#
 # Curses PWM tuner for PCA9685 using TICKS (0..4095).
 # Fix: clean Ctrl+C handling (no double curses.endwin).
 
