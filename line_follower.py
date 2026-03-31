@@ -83,7 +83,7 @@ AUTO_STEER_GAIN = 1.25
 DECISION_DEADBAND = 0.12
 
 # Autopilot throttle (choose a safe forward tick inside your band)
-AUTO_THROTTLE_TICKS = min(THROTTLE_FORWARD_TICKS, THROTTLE_STOPPED_TICKS + 15)
+AUTO_THROTTLE_TICKS = 405
 
 # If line is lost for this long, stop the car
 LINE_LOST_TIMEOUT_SEC = 0.35
