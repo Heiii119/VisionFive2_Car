@@ -68,12 +68,12 @@ AUTO_HZ = 20.0
 AUTO_DT = 1.0 / AUTO_HZ
 
 # Region of Interest: look for line in bottom ROI (more stable)
-ROI_Y_START = int(HEIGHT * 0.55)   # bottom ~45% of image
+ROI_Y_START = int(HEIGHT * 0.45)   # bottom ~55% of image
 
 # Calibration tolerance around picked HSV color
-HSV_TOL_H = 12
-HSV_TOL_S = 70
-HSV_TOL_V = 70
+HSV_TOL_H = 15
+HSV_TOL_S = 80
+HSV_TOL_V = 80
 
 # Steering control (proportional)
 # error = (line_cx - frame_cx) / frame_cx  => approx range [-1..1]
