@@ -493,7 +493,9 @@ def main():
 
 if __name__ == "__main__":
     main()        
-        ips.add(s.getsockname()[0])
+        addr = s.getsockname()   # (ip, port)
+        ip = addr[0]
+        ips.add(ip)
         s.close()
     except Exception:
         pass
