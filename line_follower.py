@@ -224,12 +224,16 @@ HTML = """<!doctype html>
       <div class="hint">Manual: arrows + C + Space • Auto: Calibrate then Start Auto • Tap the line during calibration</div>
 
       <div class="telemetry">
-        <div class="kv"><span class="muted">Mode</span><span id="mode">—</span></div>
-        <div class="kv"><span class="muted">Calibrated</span><span id="calib">—</span></div>
-        <div class="kv"><span class="muted">Decision</span><span id="decision">—</span></div>
-        <div class="kv"><span class="muted">Error</span><span id="error">—</span></div>
-        <div class="big" id="tapHint" style="display:none;">Tap the line in the video…</div>
-      </div>
+          <div class="kv"><span class="muted">Mode</span><span id="mode">—</span></div>
+          <div class="kv"><span class="muted">Calibrated</span><span id="calib">—</span></div>
+
+          <div class="kv"><span class="muted">Throttle ticks</span><span id="throttleTicks">—</span></div>
+          <div class="kv"><span class="muted">Steering ticks</span><span id="steeringTicks">—</span></div>
+
+          <div class="kv"><span class="muted">Decision</span><span id="decision">—</span></div>
+          <div class="kv"><span class="muted">Error</span><span id="error">—</span></div>
+          <div class="big" id="tapHint" style="display:none;">Tap the line in the video…</div>
+    </div>
 
       <div class="controls">
         <div class="cluster left">
@@ -283,6 +287,8 @@ HTML = """<!doctype html>
   const decisionEl = document.getElementById("decision");
   const errorEl = document.getElementById("error");
   const tapHintEl = document.getElementById("tapHint");
+  const throttleTicksEl = document.getElementById("throttleTicks");
+  const steeringTicksEl = document.getElementById("steeringTicks");
 
   const state = { up:false, down:false, left:false, right:false, center:false, brake:false };
 
@@ -434,6 +440,10 @@ HTML = """<!doctype html>
       calibEl.textContent = s.calibrated ? "YES" : "NO";
       decisionEl.textContent = s.decision || "—";
       errorEl.textContent = (typeof s.error === "number") ? s.error.toFixed(3) : "—";
+      throttleTicksEl.textContent =
+        (typeof s.throttle_ticks === "number") ? String(s.throttle_ticks) : "—";
+      steeringTicksEl.textContent =
+        (typeof s.steering_ticks === "number") ? String(s.steering_ticks) : "—";
     }catch(e){
       // ignore
     }finally{
@@ -1020,11 +1030,19 @@ def control():
 def api_status():
     with auto_lock:
         s = dict(auto_state)
+
+    # Read ticks safely
+    with pwm_lock:
+        throttle_ticks = int(values.get("throttle", THROTTLE_STOPPED_TICKS))
+        steering_ticks = int(values.get("steering", STEERING_CENTER_TICKS))
+
     return jsonify(
         autopilot_enabled=bool(s["enabled"]),
         calibrated=bool(s["calibrated"]),
         decision=str(s["decision"]),
         error=float(s["error"]),
+        throttle_ticks=throttle_ticks,
+        steering_ticks=steering_ticks,
     )
 
 @app.post("/api/calibrate/start")
