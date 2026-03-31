@@ -25,7 +25,7 @@ DEVICE = "/dev/video4"
 WIDTH = 320
 HEIGHT = 240
 FPS = 10
-PORT = 6060
+PORT = 7070
 
 # =========================
 # PCA9685 / PWM CONFIG
@@ -1135,7 +1135,9 @@ if __name__ == "__main__":
     else:
         print(f"Open on phone: http://<board-ip>:{PORT}/")
 
-    app.run(host="0.0.0.0", port=PORT, threaded=True, use_reloader=False)STEERING_MIN_TICKS = 305
+    app.run(host="0.0.0.0", port=PORT, threaded=True, use_reloader=False)
+
+STEERING_MIN_TICKS = 305
 STEERING_MAX_TICKS = 455
 
 THROTTLE_MIN_TICKS = 280
