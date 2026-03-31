@@ -492,7 +492,8 @@ def main():
     app.run(host="0.0.0.0", port=PORT, threaded=True, use_reloader=False)
 
 if __name__ == "__main__":
-    main()        ips.add(s.getsockname()[0])
+    main()        
+        ips.add(s.getsockname()[0])
         s.close()
     except Exception:
         pass
