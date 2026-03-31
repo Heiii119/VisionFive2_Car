@@ -62,13 +62,13 @@ THROTTLE_RELEASE_TO_STOP = True
 STEERING_RELEASE_TO_CENTER = False
 
 # =========================
-# Autopilot / Line following settings (NEW)
+# Autopilot / Line following settings
 # =========================
 AUTO_HZ = 20.0
 AUTO_DT = 1.0 / AUTO_HZ
 
-# Region of Interest: look for line in bottom ROI (more stable)
-ROI_Y_START = int(HEIGHT * 0.45)   # bottom ~55% of image
+# Region of Interest: bottom half only (ignore top half)
+ROI_Y_START = HEIGHT // 2
 
 # Calibration tolerance around picked HSV color
 HSV_TOL_H = 15
@@ -76,13 +76,12 @@ HSV_TOL_S = 80
 HSV_TOL_V = 80
 
 # Steering control (proportional)
-# error = (line_cx - frame_cx) / frame_cx  => approx range [-1..1]
 AUTO_STEER_GAIN = 1.25
 
 # Decision thresholds (in normalized error)
 DECISION_DEADBAND = 0.12
 
-# Autopilot throttle (choose a safe forward tick inside your band)
+# Autopilot throttle
 AUTO_THROTTLE_TICKS = 405
 
 # If line is lost for this long, stop the car
@@ -115,13 +114,14 @@ control_state = {
 FAILSAFE_TIMEOUT_SEC = 0.35
 
 # -------------------------
-# Autopilot state (NEW)
+# Autopilot state
 # -------------------------
 auto_lock = threading.Lock()
 auto_state = {
     "enabled": False,
     "calibration_armed": False,   # UI pressed "Calibrate" and waiting for tap
     "calibrated": False,
+    "hsv_mean": None,             # <-- NEW: [H,S,V] of picked line colour
     "hsv_lower": None,            # list[int,int,int]
     "hsv_upper": None,            # list[int,int,int]
     "decision": "IDLE",
@@ -145,7 +145,6 @@ HTML = """<!doctype html>
       --btnActive:rgba(76,175,80,0.35); --btnBrake:rgba(244,67,54,0.40); --btnWarn:rgba(255,193,7,0.35); --stroke:rgba(255,255,255,0.14); }
     *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
 
-    /* Prevent iOS long-press selection/callout */
     html,body{
       height:100%;margin:0;background:var(--bg);color:var(--text);
       font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
@@ -196,7 +195,7 @@ HTML = """<!doctype html>
       border:1px solid var(--stroke);
       padding:8px 10px;
       border-radius:10px;
-      min-width: 220px;
+      min-width: 260px;
     }
     .telemetry .muted{color:var(--muted);}
     .telemetry .big{font-size:14px; font-weight:800; margin-top:2px;}
@@ -226,6 +225,9 @@ HTML = """<!doctype html>
       <div class="telemetry">
           <div class="kv"><span class="muted">Mode</span><span id="mode">—</span></div>
           <div class="kv"><span class="muted">Calibrated</span><span id="calib">—</span></div>
+
+          <div class="kv"><span class="muted">Line HSV</span><span id="lineHSV">—</span></div>
+          <div class="kv"><span class="muted">HSV range</span><span id="hsvRange">—</span></div>
 
           <div class="kv"><span class="muted">Throttle ticks</span><span id="throttleTicks">—</span></div>
           <div class="kv"><span class="muted">Steering ticks</span><span id="steeringTicks">—</span></div>
@@ -272,7 +274,6 @@ HTML = """<!doctype html>
 
 <script>
 (() => {
-  // -------- Manual control sender: single in-flight request (no queue) --------
   const MANUAL_HZ = 20;
   const MANUAL_INTERVAL_MS = Math.round(1000 / MANUAL_HZ);
 
@@ -289,6 +290,9 @@ HTML = """<!doctype html>
   const tapHintEl = document.getElementById("tapHint");
   const throttleTicksEl = document.getElementById("throttleTicks");
   const steeringTicksEl = document.getElementById("steeringTicks");
+
+  const lineHSVEl = document.getElementById("lineHSV");
+  const hsvRangeEl = document.getElementById("hsvRange");
 
   const state = { up:false, down:false, left:false, right:false, center:false, brake:false };
 
@@ -361,7 +365,6 @@ HTML = """<!doctype html>
     const now = performance.now();
     const due = (now - lastSentAt) >= MANUAL_INTERVAL_MS;
 
-    // heartbeat OR changed state
     if (!dirty && !due) { updateStatusUI(); setTimeout(manualPump, 5); return; }
 
     inFlight = true;
@@ -381,7 +384,7 @@ HTML = """<!doctype html>
   }
   manualPump();
 
-  // -------- Autopilot UI (NEW) --------
+  // -------- Autopilot UI --------
   let calibrationArmed = false;
 
   async function apiPost(url, body){
@@ -431,19 +434,33 @@ HTML = """<!doctype html>
     }
   });
 
-  // Poll status (decision display)
+  // Poll status (telemetry)
   async function pollStatus(){
     try{
       const r = await fetch("/api/status", {cache:"no-store"});
       const s = await r.json();
+
       modeEl.textContent = s.autopilot_enabled ? "AUTO" : "MANUAL";
       calibEl.textContent = s.calibrated ? "YES" : "NO";
       decisionEl.textContent = s.decision || "—";
       errorEl.textContent = (typeof s.error === "number") ? s.error.toFixed(3) : "—";
+
       throttleTicksEl.textContent =
         (typeof s.throttle_ticks === "number") ? String(s.throttle_ticks) : "—";
       steeringTicksEl.textContent =
         (typeof s.steering_ticks === "number") ? String(s.steering_ticks) : "—";
+
+      if (Array.isArray(s.hsv_mean)) {
+        lineHSVEl.textContent = `H:${s.hsv_mean[0]}  S:${s.hsv_mean[1]}  V:${s.hsv_mean[2]}`;
+      } else {
+        lineHSVEl.textContent = "—";
+      }
+
+      if (Array.isArray(s.hsv_lower) && Array.isArray(s.hsv_upper)) {
+        hsvRangeEl.textContent = `[${s.hsv_lower.join(", ")}] → [${s.hsv_upper.join(", ")}]`;
+      } else {
+        hsvRangeEl.textContent = "—";
+      }
     }catch(e){
       // ignore
     }finally{
@@ -461,7 +478,6 @@ HTML = """<!doctype html>
   window.addEventListener("blur", failSafe);
   document.addEventListener("visibilitychange", () => { if (document.hidden) failSafe(); });
 
-  // Extra: prevent context menu on long press (iOS)
   document.addEventListener("contextmenu", (e) => e.preventDefault(), { passive: false });
   document.addEventListener("selectstart", (e) => e.preventDefault(), { passive: false });
 })();
@@ -573,7 +589,6 @@ def multipart_mjpeg_generator():
         yield headers + jpg + b"\r\n"
 
 def get_latest_bgr_frame():
-    """Decode latest JPEG buffer into BGR OpenCV image."""
     with _latest_lock:
         jpg = _latest_jpeg
     if jpg is None:
@@ -583,7 +598,7 @@ def get_latest_bgr_frame():
     return img
 
 # =========================
-# PCA9685 driver (same as your script)
+# PCA9685 driver
 # =========================
 class PCA9685_SMBus2:
     MODE1 = 0x00
@@ -626,10 +641,6 @@ class PCA9685_SMBus2:
             self._bus.close()
         except Exception:
             pass
-
-    @property
-    def frequency(self):
-        return self._frequency
 
     def _write8(self, reg, val):
         self._bus.write_byte_data(self.address, reg, val & 0xFF)
@@ -766,7 +777,6 @@ def pwm_safe_exit():
     pwm = None
 
 def emergency_stop_now():
-    """Immediate stop: disable auto + throttle stopped."""
     with auto_lock:
         auto_state["enabled"] = False
         auto_state["decision"] = "E-STOP"
@@ -781,7 +791,6 @@ def send_control(s: dict):
     if pwm is None:
         return
 
-    # If autopilot locks manual, ignore manual commands while auto enabled (except brake)
     with auto_lock:
         auto_enabled = bool(auto_state["enabled"])
 
@@ -790,7 +799,6 @@ def send_control(s: dict):
             emergency_stop_now()
         return
 
-    # THROTTLE
     if s.get("brake", False):
         values["throttle"] = clamp12(THROTTLE_STOPPED_TICKS)
     else:
@@ -806,7 +814,6 @@ def send_control(s: dict):
 
         values["throttle"] = max(THROTTLE_REVERSE_TICKS, min(THROTTLE_FORWARD_TICKS, values["throttle"]))
 
-    # STEERING
     if s.get("center", False):
         values["steering"] = clamp_steering(STEERING_CENTER_TICKS)
     else:
@@ -850,7 +857,7 @@ def control_loop():
             next_t = time.perf_counter()
 
 # -------------------------
-# Autopilot: vision + steering (NEW)
+# Autopilot: vision + steering
 # -------------------------
 def hsv_clip(h, s, v):
     return [
@@ -860,9 +867,6 @@ def hsv_clip(h, s, v):
     ]
 
 def compute_line_error_and_mask_info(bgr, hsv_lower, hsv_upper):
-    """
-    Returns: (found:bool, error:float, cx:int, roi_w:int)
-    """
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
 
     lower = np.array(hsv_lower, dtype=np.uint8)
@@ -870,10 +874,8 @@ def compute_line_error_and_mask_info(bgr, hsv_lower, hsv_upper):
 
     mask = cv2.inRange(hsv, lower, upper)
 
-    # Use bottom ROI only
     roi = mask[ROI_Y_START:HEIGHT, :]
 
-    # Clean noise
     kernel = np.ones((5, 5), np.uint8)
     roi = cv2.morphologyEx(roi, cv2.MORPH_OPEN, kernel, iterations=1)
     roi = cv2.morphologyEx(roi, cv2.MORPH_CLOSE, kernel, iterations=1)
@@ -882,10 +884,9 @@ def compute_line_error_and_mask_info(bgr, hsv_lower, hsv_upper):
     if not contours:
         return False, 0.0, -1, roi.shape[1]
 
-    # Largest blob assumed to be the line
     c = max(contours, key=cv2.contourArea)
     area = cv2.contourArea(c)
-    if area < 200:  # too small => noise
+    if area < 200:
         return False, 0.0, -1, roi.shape[1]
 
     M = cv2.moments(c)
@@ -894,8 +895,6 @@ def compute_line_error_and_mask_info(bgr, hsv_lower, hsv_upper):
 
     cx = int(M["m10"] / M["m00"])
     frame_cx = roi.shape[1] // 2
-
-    # Normalized error: + means line is to the right -> steer right
     error = (cx - frame_cx) / float(frame_cx if frame_cx != 0 else 1)
 
     return True, float(error), cx, roi.shape[1]
@@ -930,11 +929,9 @@ def autopilot_loop():
             continue
 
         found, err, cx, roi_w = compute_line_error_and_mask_info(frame, hsv_lower, hsv_upper)
-
         now = time.perf_counter()
 
         if not found:
-            # line lost -> after timeout, stop
             with auto_lock:
                 last_seen = float(auto_state["last_line_seen"])
                 auto_state["decision"] = "LINE LOST"
@@ -945,15 +942,12 @@ def autopilot_loop():
                 with pwm_lock:
                     values["throttle"] = clamp12(THROTTLE_STOPPED_TICKS)
                     pwm.set_pwm_12bit(THROTTLE_CHANNEL, values["throttle"])
-
-            # keep last steering (or optionally center)
         else:
             with auto_lock:
                 auto_state["last_line_seen"] = now
                 auto_state["error"] = float(err)
                 auto_state["last_update"] = now
 
-            # Decide direction
             if err > DECISION_DEADBAND:
                 decision = "TURN RIGHT"
             elif err < -DECISION_DEADBAND:
@@ -961,16 +955,15 @@ def autopilot_loop():
             else:
                 decision = "GO STRAIGHT"
 
-            # Map error -> steering ticks (P-control)
-            # In your manual logic: left increases ticks, right decreases ticks.
-            steer = STEERING_CENTER_TICKS - int(AUTO_STEER_GAIN * err * ((STEERING_MAX_TICKS - STEERING_MIN_TICKS) / 2.0))
+            steer = STEERING_CENTER_TICKS - int(
+                AUTO_STEER_GAIN * err * ((STEERING_MAX_TICKS - STEERING_MIN_TICKS) / 2.0)
+            )
             steer = clamp_steering(steer)
 
             with auto_lock:
                 auto_state["decision"] = decision
 
             with pwm_lock:
-                # Move forward while line is visible
                 values["throttle"] = clamp12(AUTO_THROTTLE_TICKS)
                 values["throttle"] = max(THROTTLE_REVERSE_TICKS, min(THROTTLE_FORWARD_TICKS, values["throttle"]))
                 values["steering"] = steer
@@ -1019,19 +1012,16 @@ def control():
         control_state["brake"] = b("brake")
         control_state["last_seen"] = time.perf_counter()
 
-    # Manual brake should always be able to stop auto quickly
     if control_state["brake"]:
         emergency_stop_now()
 
     return jsonify(ok=True)
 
-# ---- NEW API: calibration / autopilot / status ----
 @app.get("/api/status")
 def api_status():
     with auto_lock:
         s = dict(auto_state)
 
-    # Read ticks safely
     with pwm_lock:
         throttle_ticks = int(values.get("throttle", THROTTLE_STOPPED_TICKS))
         steering_ticks = int(values.get("steering", STEERING_CENTER_TICKS))
@@ -1043,11 +1033,15 @@ def api_status():
         error=float(s["error"]),
         throttle_ticks=throttle_ticks,
         steering_ticks=steering_ticks,
+
+        # <-- NEW: expose calibration HSV info
+        hsv_mean=s.get("hsv_mean"),
+        hsv_lower=s.get("hsv_lower"),
+        hsv_upper=s.get("hsv_upper"),
     )
 
 @app.post("/api/calibrate/start")
 def api_calibrate_start():
-    # Arm calibration: user will tap the line in the video
     with auto_lock:
         auto_state["calibration_armed"] = True
         auto_state["decision"] = "CALIBRATE: TAP LINE"
@@ -1072,14 +1066,12 @@ def api_calibrate_pick():
     x = max(0, min(WIDTH - 1, x))
     y = max(0, min(HEIGHT - 1, y))
 
-    # Sample a small patch around the tap point
     r = 6
     x0, x1 = max(0, x - r), min(WIDTH, x + r + 1)
     y0, y1 = max(0, y - r), min(HEIGHT, y + r + 1)
     patch = frame[y0:y1, x0:x1]
     hsv_patch = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)
 
-    # Mean HSV for stability
     h = int(np.mean(hsv_patch[:, :, 0]))
     s = int(np.mean(hsv_patch[:, :, 1]))
     v = int(np.mean(hsv_patch[:, :, 2]))
@@ -1088,6 +1080,7 @@ def api_calibrate_pick():
     upper = hsv_clip(h + HSV_TOL_H, s + HSV_TOL_S, v + HSV_TOL_V)
 
     with auto_lock:
+        auto_state["hsv_mean"] = [h, s, v]     # <-- NEW: store picked HSV center
         auto_state["hsv_lower"] = lower
         auto_state["hsv_upper"] = upper
         auto_state["calibrated"] = True
@@ -1112,7 +1105,6 @@ def api_autopilot_stop():
     with auto_lock:
         auto_state["enabled"] = False
         auto_state["decision"] = "AUTO STOP"
-    # stop throttle
     with pwm_lock:
         values["throttle"] = clamp12(THROTTLE_STOPPED_TICKS)
         pwm.set_pwm_12bit(THROTTLE_CHANNEL, values["throttle"])
@@ -1154,420 +1146,3 @@ if __name__ == "__main__":
         print(f"Open on phone: http://<board-ip>:{PORT}/")
 
     app.run(host="0.0.0.0", port=PORT, threaded=True, use_reloader=False)
-
-STEERING_MIN_TICKS = 305
-STEERING_MAX_TICKS = 455
-
-THROTTLE_MIN_TICKS = 280
-THROTTLE_MAX_TICKS = 450
-
-START_THROTTLE_TICKS = THROTTLE_STOPPED_TICKS
-START_STEERING_TICKS = STEERING_CENTER_TICKS
-
-STOP_ON_EXIT = True
-
-# =========================
-# Line-follow tuning
-# =========================
-# Region-of-interest: use bottom part of image for tracking
-ROI_Y_START = 0.55  # start at 55% down from top
-
-# How wide is the calibration patch around image center (in ROI coords)
-CAL_PATCH_W = 120
-CAL_PATCH_H = 90
-
-# HSV threshold margins around calibrated line color (supports many colors)
-H_MARGIN = 12            # hue margin (0..179)
-S_MIN = 60               # minimum saturation
-V_MIN = 60               # minimum value/brightness
-
-# Morphology / filtering
-MORPH_K = 5
-MIN_CONTOUR_AREA = 900   # pixels, tune if needed
-
-# Control loop
-CONTROL_HZ = 30.0
-DT = 1.0 / CONTROL_HZ
-
-# Steering control: simple P controller (error is normalized [-1..1])
-KP_STEER = 120.0          # ticks per unit error (tune)
-STEER_SMOOTH_ALPHA = 0.35 # 0..1 higher = more responsive, less smooth
-
-# Throttle while following
-FOLLOW_THROTTLE_TICKS = 382   # should be inside min/max; adjust for your car
-
-# If line lost, what to do
-LOST_LINE_BRAKE = True
-LOST_LINE_TIMEOUT_SEC = 0.6   # brake/center if lost longer than this
-
-# Optional: smooth centroid estimate a bit
-CENTROID_HISTORY = 5
-
-# =========================
-# PCA9685 driver (same style as your Flask file)
-# =========================
-class PCA9685_SMBus2:
-    MODE1 = 0x00
-    MODE2 = 0x01
-    PRESCALE = 0xFE
-    LED0_ON_L = 0x06
-
-    RESTART = 0x80
-    SLEEP = 0x10
-    ALLCALL = 0x01
-    OUTDRV = 0x04
-
-    def __init__(self, busnum, address=0x40, frequency=60):
-        try:
-            from smbus2 import SMBus
-        except Exception as e:
-            raise SystemExit("Missing smbus2. Install with: pip3 install --user smbus2") from e
-
-        self.address = int(address)
-        self._bus = SMBus(int(busnum))
-        self._frequency = None
-
-        self._write8(self.MODE1, self.ALLCALL)
-        self._write8(self.MODE2, self.OUTDRV)
-        time.sleep(0.005)
-
-        mode1 = self._read8(self.MODE1)
-        mode1 = mode1 & ~self.SLEEP
-        self._write8(self.MODE1, mode1)
-        time.sleep(0.005)
-
-        self.set_pwm_freq(frequency)
-
-    def close(self):
-        try:
-            self._bus.close()
-        except Exception:
-            pass
-
-    def _write8(self, reg, val):
-        self._bus.write_byte_data(self.address, reg, val & 0xFF)
-
-    def _read8(self, reg):
-        return self._bus.read_byte_data(self.address, reg) & 0xFF
-
-    def set_pwm_freq(self, freq_hz):
-        osc = 25_000_000.0
-        freq_hz = float(freq_hz)
-        prescaleval = (osc / (4096.0 * freq_hz)) - 1.0
-        prescale = int(round(prescaleval))
-        prescale = max(3, min(255, prescale))
-
-        oldmode = self._read8(self.MODE1)
-        newmode = (oldmode & 0x7F) | self.SLEEP
-        self._write8(self.MODE1, newmode)
-        self._write8(self.PRESCALE, prescale)
-        self._write8(self.MODE1, oldmode)
-        time.sleep(0.005)
-        self._write8(self.MODE1, oldmode | self.RESTART)
-        self._frequency = freq_hz
-
-    def set_pwm(self, channel, on, off):
-        ch = int(channel)
-        on = int(on) & 0x0FFF
-        off = int(off) & 0x0FFF
-        base = self.LED0_ON_L + 4 * ch
-        self._write8(base + 0, on & 0xFF)
-        self._write8(base + 1, (on >> 8) & 0xFF)
-        self._write8(base + 2, off & 0xFF)
-        self._write8(base + 3, (off >> 8) & 0xFF)
-
-    def set_pwm_12bit(self, channel, value_12bit):
-        v = max(0, min(4095, int(value_12bit)))
-        self.set_pwm(channel, 0, v)
-
-
-class PCA9685Driver:
-    def __init__(self, address=0x40, busnum=1, frequency=60, prefer="smbus2"):
-        self._mode = None
-        self._drv = None
-        smbus2_err = None
-
-        if prefer in ("smbus2", "auto"):
-            try:
-                self._drv = PCA9685_SMBus2(busnum=busnum, address=address, frequency=frequency)
-                self._mode = "smbus2"
-                return
-            except Exception as e:
-                if prefer == "smbus2":
-                    raise
-                smbus2_err = e
-
-        try:
-            import Adafruit_PCA9685 as LegacyPCA9685
-            self._drv = LegacyPCA9685.PCA9685(address=address, busnum=busnum)
-            self._drv.set_pwm_freq(frequency)
-            self._mode = "legacy"
-        except Exception as e:
-            raise SystemExit(
-                "Could not initialize PCA9685.\n"
-                "Tried:\n"
-                f"  - smbus2 direct driver: {smbus2_err}\n"
-                f"  - Adafruit_PCA9685: {e}\n\n"
-                "Fix:\n"
-                "  pip3 install --user smbus2\n"
-                "and ensure /dev/i2c-<bus> exists and i2cdetect shows 0x40.\n"
-            )
-
-    def close(self):
-        if hasattr(self._drv, "close"):
-            self._drv.close()
-
-    def set_pwm_12bit(self, channel, value_12bit):
-        if self._mode == "legacy":
-            v = max(0, min(4095, int(value_12bit)))
-            self._drv.set_pwm(channel, 0, v)
-        else:
-            self._drv.set_pwm_12bit(channel, value_12bit)
-
-
-# =========================
-# Helpers
-# =========================
-def clamp(v, lo, hi):
-    return max(lo, min(hi, int(v)))
-
-def clamp_throttle(t):
-    return clamp(t, THROTTLE_MIN_TICKS, THROTTLE_MAX_TICKS)
-
-def clamp_steering(s):
-    return clamp(s, STEERING_MIN_TICKS, STEERING_MAX_TICKS)
-
-def safe_stop(pwm: PCA9685Driver):
-    try:
-        pwm.set_pwm_12bit(THROTTLE_CHANNEL, clamp_throttle(THROTTLE_STOPPED_TICKS))
-        pwm.set_pwm_12bit(STEERING_CHANNEL, clamp_steering(STEERING_CENTER_TICKS))
-    except Exception:
-        pass
-
-def open_camera():
-    # V4L2 backend usually best on Linux
-    cap = cv2.VideoCapture(DEVICE, cv2.CAP_V4L2)
-    if not cap.isOpened():
-        raise SystemExit(f"Could not open camera {DEVICE}")
-
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH,  WIDTH)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, HEIGHT)
-    cap.set(cv2.CAP_PROP_FPS, FPS)
-
-    # Try to reduce latency
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-    return cap
-
-def roi_crop(frame_bgr):
-    h, w = frame_bgr.shape[:2]
-    y0 = int(h * ROI_Y_START)
-    return frame_bgr[y0:h, 0:w], y0
-
-def circular_hue_bounds(h_center, margin):
-    # Hue range in OpenCV: 0..179
-    lo = int(h_center - margin)
-    hi = int(h_center + margin)
-    if lo < 0:
-        return [(0, hi), (180 + lo, 179)]
-    if hi > 179:
-        return [(0, hi - 180), (lo, 179)]
-    return [(lo, hi)]
-
-def build_line_mask(hsv_roi, h_center, s_center, v_center):
-    # Keep S/V floors but allow bright/dim variability
-    s_lo = max(S_MIN, int(0.5 * s_center))
-    v_lo = max(V_MIN, int(0.5 * v_center))
-
-    ranges = circular_hue_bounds(h_center, H_MARGIN)
-    mask = None
-    for (h_lo, h_hi) in ranges:
-        lower = np.array([h_lo, s_lo, v_lo], dtype=np.uint8)
-        upper = np.array([h_hi, 255, 255], dtype=np.uint8)
-        m = cv2.inRange(hsv_roi, lower, upper)
-        mask = m if mask is None else cv2.bitwise_or(mask, m)
-
-    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (MORPH_K, MORPH_K))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k, iterations=1)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k, iterations=2)
-    return mask
-
-def find_line_centroid(mask):
-    # Return (cx, area, contour) in mask coords, or None if not found
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        return None
-    best = max(contours, key=cv2.contourArea)
-    area = float(cv2.contourArea(best))
-    if area < MIN_CONTOUR_AREA:
-        return None
-    m = cv2.moments(best)
-    if m["m00"] <= 1e-6:
-        return None
-    cx = m["m10"] / m["m00"]
-    return (cx, area, best)
-
-def calibrate_line_color(cap):
-    """
-    User places line in the middle of the camera.
-    We sample a center patch in the ROI and take the dominant HSV.
-    """
-    print("\nCalibration: place the line under the center of the camera view.")
-    print("Hold still… capturing samples (about 1.5s).")
-
-    samples_h = []
-    samples_s = []
-    samples_v = []
-
-    t_end = time.time() + 1.5
-    while time.time() < t_end:
-        ok, frame = cap.read()
-        if not ok:
-            continue
-
-        roi, _ = roi_crop(frame)
-        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-        rh, rw = hsv.shape[:2]
-
-        cx = rw // 2
-        cy = rh // 2
-        x0 = max(0, cx - CAL_PATCH_W // 2)
-        y0 = max(0, cy - CAL_PATCH_H // 2)
-        x1 = min(rw, cx + CAL_PATCH_W // 2)
-        y1 = min(rh, cy + CAL_PATCH_H // 2)
-
-        patch = hsv[y0:y1, x0:x1]
-        # Robust: take median (handles glare/noise)
-        med = np.median(patch.reshape(-1, 3), axis=0)
-        samples_h.append(med[0])
-        samples_s.append(med[1])
-        samples_v.append(med[2])
-
-        time.sleep(0.03)
-
-    h = int(np.median(np.array(samples_h)))
-    s = int(np.median(np.array(samples_s)))
-    v = int(np.median(np.array(samples_v)))
-
-    print(f"Calibrated line HSV center: H={h}, S={s}, V={v}")
-    print(f"Using Hue margin ±{H_MARGIN}, S/V floors dynamic (min S={S_MIN}, min V={V_MIN}).")
-    return h, s, v
-
-def prompt_start():
-    ans = input("\nPress (y) to start line following: ").strip().lower()
-    return ans == "y"
-
-# =========================
-# Main line-follow loop
-# =========================
-def run_line_following(cap, pwm, h_center, s_center, v_center):
-    print("\nLine following started. Press Ctrl+C to stop.\n")
-
-    # Initialize outputs
-    steer_cmd = float(STEERING_CENTER_TICKS)
-    throttle_cmd = float(clamp_throttle(FOLLOW_THROTTLE_TICKS))
-    pwm.set_pwm_12bit(STEERING_CHANNEL, clamp_steering(steer_cmd))
-    pwm.set_pwm_12bit(THROTTLE_CHANNEL, clamp_throttle(throttle_cmd))
-
-    last_seen_line = time.time()
-    cx_hist = deque(maxlen=CENTROID_HISTORY)
-
-    next_t = time.perf_counter()
-
-    while True:
-        next_t += DT
-
-        ok, frame = cap.read()
-        if not ok:
-            # camera hiccup: treat as lost line
-            time.sleep(0.01)
-            continue
-
-        roi, roi_y0 = roi_crop(frame)
-        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-
-        mask = build_line_mask(hsv, h_center, s_center, v_center)
-        found = find_line_centroid(mask)
-
-        rh, rw = mask.shape[:2]
-        center_x = rw / 2.0
-
-        if found is None:
-            # line lost
-            if (time.time() - last_seen_line) > LOST_LINE_TIMEOUT_SEC:
-                if LOST_LINE_BRAKE:
-                    pwm.set_pwm_12bit(THROTTLE_CHANNEL, clamp_throttle(THROTTLE_STOPPED_TICKS))
-                pwm.set_pwm_12bit(STEERING_CHANNEL, clamp_steering(STEERING_CENTER_TICKS))
-            # keep loop timing
-        else:
-            cx, area, contour = found
-            last_seen_line = time.time()
-            cx_hist.append(cx)
-            cx_smooth = float(np.mean(cx_hist))
-
-            # error: -1 (line left) .. +1 (line right)
-            err = (cx_smooth - center_x) / center_x
-
-            # P control -> steering ticks
-            steer_target = STEERING_CENTER_TICKS + (KP_STEER * err)
-
-            # Smooth steering command
-            steer_cmd = (1.0 - STEER_SMOOTH_ALPHA) * steer_cmd + STEER_SMOOTH_ALPHA * steer_target
-
-            # Apply outputs
-            pwm.set_pwm_12bit(STEERING_CHANNEL, clamp_steering(steer_cmd))
-            pwm.set_pwm_12bit(THROTTLE_CHANNEL, clamp_throttle(throttle_cmd))
-
-        # Maintain control rate
-        remaining = next_t - time.perf_counter()
-        if remaining > 0:
-            time.sleep(remaining)
-        else:
-            next_t = time.perf_counter()
-
-
-def main():
-    pwm = PCA9685Driver(
-        address=PCA9685_ADDR,
-        busnum=I2C_BUS,
-        frequency=PCA9685_FREQ,
-        prefer=DRIVER_PREFER,
-    )
-
-    cap = None
-
-    def handle_exit(sig=None, frame=None):
-        if STOP_ON_EXIT:
-            safe_stop(pwm)
-        try:
-            if cap is not None:
-                cap.release()
-        except Exception:
-            pass
-        try:
-            pwm.close()
-        except Exception:
-            pass
-        sys.exit(0)
-
-    signal.signal(signal.SIGINT, handle_exit)
-    signal.signal(signal.SIGTERM, handle_exit)
-
-    # Start safe
-    safe_stop(pwm)
-
-    cap = open_camera()
-
-    # Calibrate using line in middle of camera
-    h, s, v = calibrate_line_color(cap)
-
-    # Ask user to start
-    if not prompt_start():
-        print("Not starting. Exiting.")
-        handle_exit()
-
-    # Go
-    run_line_following(cap, pwm, h, s, v)
-
-
-if __name__ == "__main__":
-    main()
