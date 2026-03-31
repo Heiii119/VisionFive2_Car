@@ -14,7 +14,7 @@ DEVICE = "/dev/video4"   # change to /dev/video0 if needed
 WIDTH = 640
 HEIGHT = 480
 FPS = 15
-PORT = 7071
+PORT = 5050
 
 JPEG_QUALITY = 80
 
