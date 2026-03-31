@@ -41,7 +41,7 @@ STEERING_CHANNEL = 1
 # TICKS (0..4095) calibration/presets
 THROTTLE_STOPPED_TICKS = 370
 THROTTLE_FORWARD_TICKS = 410
-THROTTLE_REVERSE_TICKS = 315
+THROTTLE_REVERSE_TICKS = 310
 
 STEERING_LEFT_TICKS   = 280
 STEERING_CENTER_TICKS = 380
@@ -67,8 +67,8 @@ STEERING_RELEASE_TO_CENTER = False
 AUTO_HZ = 20.0
 AUTO_DT = 1.0 / AUTO_HZ
 
-# Region of Interest: bottom half only (ignore top half)
-ROI_Y_START = HEIGHT // 2
+# Region of Interest: bottom area only (ignore top 35%)
+ROI_Y_START = int(HEIGHT * 0.35)
 
 # Calibration tolerance around picked HSV color
 HSV_TOL_H = 15
@@ -82,7 +82,7 @@ AUTO_STEER_GAIN = 1.25
 DECISION_DEADBAND = 0.12
 
 # Autopilot throttle
-AUTO_THROTTLE_TICKS = 405
+AUTO_THROTTLE_TICKS = 410
 
 # If line is lost for this long, stop the car
 LINE_LOST_TIMEOUT_SEC = 0.35
