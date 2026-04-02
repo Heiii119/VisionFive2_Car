@@ -73,8 +73,8 @@ ROI_Y_START = int(HEIGHT * 0.35)
 # Calibration tolerance around picked Lab colour (OpenCV Lab 8-bit)
 # Tune these for your tape/lighting:
 LAB_TOL_L = 40
-LAB_TOL_A = 25
-LAB_TOL_B = 25
+LAB_TOL_A = 20
+LAB_TOL_B = 20
 
 # Steering control (proportional)
 AUTO_STEER_GAIN = 1.25
