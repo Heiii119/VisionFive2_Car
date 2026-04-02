@@ -407,13 +407,7 @@ def main():
 
             # Run YOLO less often
             if max(1, args.detect_every) == 1 or (stream_frame_i % max(1, args.detect_every) == 0):
-                last_detections = detect_yolov5_opencv(
-                    net,
-                    frame,
-                    conf_thres=args.conf,
-                    iou_thres=args.iou,
-                    input_size=args.imgsz,
-                )
+                last_detections = detect_yolov5_opencv(net, frame, conf_thres=args.conf, iou_thres=args.iou, input_size=args.imgsz)
 
             # Annotate on the copied frame (no extra .copy())
             annotated = frame
