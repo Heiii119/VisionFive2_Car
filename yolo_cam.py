@@ -268,6 +268,7 @@ def draw_detections(frame, detections, class_names=None):
 
 def capture_worker(cap):
     global _latest_frame
+    n = 0
     while True:
         ok, frame = cap.read()
         if not ok or frame is None:
@@ -275,6 +276,9 @@ def capture_worker(cap):
             continue
         with _frame_lock:
             _latest_frame = frame
+        n += 1
+        if n % 60 == 0:
+            print("capture+worker: frame", frame.shape)
             
 # ----------------------------
 # Main
@@ -319,8 +323,6 @@ def main():
     cap = cv2.VideoCapture(src, cv2.CAP_V4L2)
     if not cap.isOpened():
         raise RuntimeError(f"Failed to open video source: {args.source}")
-        t_cap = threading.Thread(target=capture_worker, args=(cap,), daemon=True)
-        t_cap.start()
 
     # Reduce camera buffering if supported
     try:
@@ -333,6 +335,10 @@ def main():
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.cap_height)
     if args.cap_fps:
         cap.set(cv2.CAP_PROP_FPS, args.cap_fps)
+
+    # Start capture thread (THIS WAS MISSING due to indentation)
+    t_cap = threading.Thread(target=capture_worker, args=(cap,), daemon=True)
+    t_cap.start()
 
     # Start server
     start_stream_server(args.host, port)
@@ -396,6 +402,8 @@ def main():
                     _latest_seq += 1
                     _latest_ts = time.time()
                     _latest_cond.notify_all()
+            # debug
+            print("main: jpeg bytes", len(payload), "seq", _latest_seq)
 
             if args.show_local:
                 cv2.imshow("YOLOv5 Stream", annotated)
