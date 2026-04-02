@@ -171,7 +171,7 @@ kill -9 <PID>
 git clone https://github.com/ultralytics/yolov5
 cd yolov5
 pip install -r requirements.txt oonx oonxsim
-python export.py --weights yolov5n.pt --include onnx --img 640 --batch 1 --opset 11 --simplify
+python export.py --weights yolov5n.pt --include onnx --imgsz 640 --batch-size 1 --opset 11
 ```
 #### 2) transfer the file to the board
 ```bash
