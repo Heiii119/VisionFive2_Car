@@ -2,6 +2,7 @@
 import argparse
 import threading
 import time
+import socket
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
 
@@ -9,28 +10,58 @@ import cv2
 import numpy as np
 
 # ----------------------------
-# MJPEG Streaming Server
+# MJPEG Streaming (latest-frame, drop-old-frames)
 # ----------------------------
 _latest_jpeg = None
-_latest_lock = threading.Lock()
+_latest_seq = 0
+_latest_ts = 0.0
+_latest_cond = threading.Condition()  # condition variable = wait for new frame
+
+BOUNDARY = "frame"
 
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
 
+def _detect_local_ip():
+    # Helpful for printing a usable URL when binding to 0.0.0.0
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
+
 class StreamHandler(BaseHTTPRequestHandler):
+    server_version = "YOLOMJPEG/1.0"
+
+    def log_message(self, fmt, *args):
+        # quieter logs
+        return
+
     def do_GET(self):
         if self.path in ("/", "/index.html"):
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
             self.end_headers()
-            html = """
-<!doctype html>
+            html = f"""<!doctype html>
 <html>
-  <head><title>YOLO Stream</title></head>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>YOLOv5 MJPEG Stream</title>
+    <style>
+      body {{ font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 12px; }}
+      img {{ max-width: 100%; height: auto; background: #000; }}
+      code {{ background: #f2f2f2; padding: 2px 6px; border-radius: 6px; }}
+    </style>
+  </head>
   <body>
-    <h2>YOLOv5 MJPEG Stream</h2>
+    <h2>YOLOv5 MJPEG Stream (Latest-Frame, Low-Latency)</h2>
     <p>Stream endpoint: <code>/mjpeg</code></p>
-    <img src="/mjpeg" style="max-width: 100%; height: auto;" />
+    <img src="/mjpeg" />
   </body>
 </html>
 """
@@ -38,32 +69,51 @@ class StreamHandler(BaseHTTPRequestHandler):
             return
 
         if self.path == "/mjpeg":
+            # Reduce latency on some networks (disable Nagle)
+            try:
+                self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            except Exception:
+                pass
+
             self.send_response(200)
             self.send_header("Age", "0")
-            self.send_header("Cache-Control", "no-cache, private")
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
             self.send_header("Pragma", "no-cache")
-            self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+            self.send_header("Content-Type", f"multipart/x-mixed-replace; boundary={BOUNDARY}")
             self.end_headers()
+
+            last_seq = -1
 
             try:
                 while True:
-                    with _latest_lock:
-                        jpg = _latest_jpeg
+                    # Wait for a NEW frame (sequence number changes)
+                    with _latest_cond:
+                        if _latest_jpeg is None:
+                            _latest_cond.wait(timeout=1.0)
 
+                        # If no new frame yet, wait (prevents tight loop)
+                        while _latest_seq == last_seq:
+                            _latest_cond.wait(timeout=1.0)
+
+                        jpg = _latest_jpeg
+                        seq = _latest_seq
+                        # ts = _latest_ts  # if you want to use it
                     if jpg is None:
-                        time.sleep(0.05)
                         continue
 
-                    self.wfile.write(b"--frame\r\n")
-                    self.send_header("Content-Type", "image/jpeg")
-                    self.send_header("Content-Length", str(len(jpg)))
-                    self.end_headers()
+                    last_seq = seq
+
+                    # Write one multipart frame part (manual headers for safety)
+                    self.wfile.write(f"--{BOUNDARY}\r\n".encode("ascii"))
+                    self.wfile.write(b"Content-Type: image/jpeg\r\n")
+                    self.wfile.write(f"Content-Length: {len(jpg)}\r\n\r\n".encode("ascii"))
                     self.wfile.write(jpg)
                     self.wfile.write(b"\r\n")
-                    time.sleep(0.02)
-            except BrokenPipeError:
+                    self.wfile.flush()
+
+            except (BrokenPipeError, ConnectionResetError):
                 return
-            except ConnectionResetError:
+            except Exception:
                 return
 
         self.send_response(404)
@@ -87,7 +137,6 @@ def load_class_names(path):
         return None
 
 def letterbox(im, new_shape=(640, 640), color=(114, 114, 114)):
-    # Resize + pad to keep aspect ratio (YOLO-style)
     h, w = im.shape[:2]
     if isinstance(new_shape, int):
         new_shape = (new_shape, new_shape)
@@ -113,7 +162,6 @@ def letterbox(im, new_shape=(640, 640), color=(114, 114, 114)):
     return im, r, (left, top)
 
 def xywh_to_xyxy(xywh):
-    # xywh is Nx4 in center format
     x = xywh[:, 0]
     y = xywh[:, 1]
     w = xywh[:, 2]
@@ -125,18 +173,13 @@ def xywh_to_xyxy(xywh):
     return np.stack([x1, y1, x2, y2], axis=1)
 
 def detect_yolov5_opencv(net, frame_bgr, conf_thres=0.25, iou_thres=0.45, input_size=640):
-    # Preprocess
     img, r, (padw, padh) = letterbox(frame_bgr, (input_size, input_size))
     blob = cv2.dnn.blobFromImage(
         img, scalefactor=1.0 / 255.0, size=(input_size, input_size), swapRB=True, crop=False
     )
     net.setInput(blob)
-
-    # Forward
     out = net.forward()
 
-    # Normalize output shape
-    # Common: (1, 25200, 85)
     if out.ndim == 3:
         pred = out[0]
     elif out.ndim == 2:
@@ -165,18 +208,15 @@ def detect_yolov5_opencv(net, frame_bgr, conf_thres=0.25, iou_thres=0.45, input_
 
     boxes_xyxy = xywh_to_xyxy(boxes_xywh)
 
-    # Undo letterbox: from input coords -> original frame coords
     boxes_xyxy[:, [0, 2]] = (boxes_xyxy[:, [0, 2]] - padw) / r
     boxes_xyxy[:, [1, 3]] = (boxes_xyxy[:, [1, 3]] - padh) / r
 
-    # Clip
     h0, w0 = frame_bgr.shape[:2]
     boxes_xyxy[:, 0] = np.clip(boxes_xyxy[:, 0], 0, w0 - 1)
     boxes_xyxy[:, 1] = np.clip(boxes_xyxy[:, 1], 0, h0 - 1)
     boxes_xyxy[:, 2] = np.clip(boxes_xyxy[:, 2], 0, w0 - 1)
     boxes_xyxy[:, 3] = np.clip(boxes_xyxy[:, 3], 0, h0 - 1)
 
-    # Prepare for NMSBoxes (expects xywh ints)
     boxes_xywh_nms = []
     for b in boxes_xyxy:
         x1, y1, x2, y2 = b
@@ -202,12 +242,10 @@ def detect_yolov5_opencv(net, frame_bgr, conf_thres=0.25, iou_thres=0.45, input_
 def draw_detections(frame, detections, class_names=None):
     for (x1, y1, x2, y2, score, cid) in detections:
         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-
         if class_names and 0 <= cid < len(class_names):
             label = f"{class_names[cid]} {score:.2f}"
         else:
             label = f"id:{cid} {score:.2f}"
-
         y = max(0, y1 - 7)
         cv2.putText(frame, label, (x1, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
     return frame
@@ -227,28 +265,38 @@ def main():
     ap.add_argument("--port", type=int, default=8080, help="Streaming port")
     ap.add_argument("--jpeg_quality", type=int, default=80, help="JPEG quality 1-100")
     ap.add_argument("--show_local", action="store_true", help="Show local preview window (needs GUI)")
+    ap.add_argument("--cap_width", type=int, default=0, help="Optional capture width (0 = default)")
+    ap.add_argument("--cap_height", type=int, default=0, help="Optional capture height (0 = default)")
+    ap.add_argument("--cap_fps", type=int, default=0, help="Optional capture fps (0 = default)")
     args = ap.parse_args()
 
     class_names = load_class_names(args.names) if args.names else None
 
-    # Load network
     net = cv2.dnn.readNetFromONNX(args.model)
 
-    # If your OpenCV build supports it, these can help (safe to keep commented if unsure):
-    # net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
-    # net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
-
-    # Open source
     src = int(args.source) if args.source.isdigit() else args.source
     cap = cv2.VideoCapture(src)
     if not cap.isOpened():
         raise RuntimeError(f"Failed to open video source: {args.source}")
 
-    # Start streaming server
+    # Reduce camera buffering if supported (helps latency)
+    try:
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    except Exception:
+        pass
+    if args.cap_width:
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.cap_width)
+    if args.cap_height:
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.cap_height)
+    if args.cap_fps:
+        cap.set(cv2.CAP_PROP_FPS, args.cap_fps)
+
+    # Start server
     start_stream_server(args.host, args.port)
-    print(f"Streaming page:   http://{args.host}:{args.port}/")
-    print(f"MJPEG endpoint:   http://{args.host}:{args.port}/mjpeg")
-    print("Tip: if args.host is 0.0.0.0, use your board IP on the other device.")
+
+    ip_for_print = _detect_local_ip() if args.host == "0.0.0.0" else args.host
+    print(f"Streaming page: http://{ip_for_print}:{args.port}/")
+    print(f"MJPEG endpoint: http://{ip_for_print}:{args.port}/mjpeg")
 
     encode_params = [int(cv2.IMWRITE_JPEG_QUALITY), int(args.jpeg_quality)]
 
@@ -256,11 +304,13 @@ def main():
     fps_frames = 0
     last_fps = 0.0
 
+    global _latest_jpeg, _latest_seq, _latest_ts
+
     try:
         while True:
             ok, frame = cap.read()
             if not ok or frame is None:
-                time.sleep(0.02)
+                time.sleep(0.01)
                 continue
 
             detections = detect_yolov5_opencv(
@@ -274,7 +324,7 @@ def main():
             annotated = frame.copy()
             draw_detections(annotated, detections, class_names=class_names)
 
-            # FPS counter (overlay)
+            # FPS overlay
             fps_frames += 1
             dt = time.time() - fps_t0
             if dt >= 1.0:
@@ -292,14 +342,16 @@ def main():
                 2,
             )
 
-            # Update JPEG for web stream
+            # Encode once; all clients receive this latest JPEG
             ok2, jpg = cv2.imencode(".jpg", annotated, encode_params)
             if ok2:
-                with _latest_lock:
-                    global _latest_jpeg
-                    _latest_jpeg = jpg.tobytes()
+                payload = jpg.tobytes()
+                with _latest_cond:
+                    _latest_jpeg = payload
+                    _latest_seq += 1
+                    _latest_ts = time.time()
+                    _latest_cond.notify_all()
 
-            # Optional local preview
             if args.show_local:
                 cv2.imshow("YOLOv5 Stream", annotated)
                 if cv2.waitKey(1) & 0xFF == ord("q"):
