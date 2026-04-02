@@ -280,10 +280,10 @@ def main():
     ap.add_argument("--conf", type=float, default=0.25, help="Confidence threshold")
     ap.add_argument("--iou", type=float, default=0.45, help="NMS IoU threshold")
     ap.add_argument("--names", default="", help="Optional path to class names file (coco.names)")
-    ap.add_argument("--jpeg_quality", type=int, default=80, help="JPEG quality 1-100")
+    ap.add_argument("--jpeg_quality", type=int, default=60, help="JPEG quality 1-100")
     ap.add_argument("--show_local", action="store_true", help="Show local preview window (needs GUI)")
-    ap.add_argument("--cap_width", type=int, default=0, help="Optional capture width (0 = default)")
-    ap.add_argument("--cap_height", type=int, default=0, help="Optional capture height (0 = default)")
+    ap.add_argument("--cap_width", type=int, default=320, help="Optional capture width (0 = default)")
+    ap.add_argument("--cap_height", type=int, default=240, help="Optional capture height (0 = default)")
     ap.add_argument("--cap_fps", type=int, default=0, help="Optional capture fps (0 = default)")
     args = ap.parse_args()
 
