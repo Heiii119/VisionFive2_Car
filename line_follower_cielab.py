@@ -71,7 +71,6 @@ AUTO_DT = 1.0 / AUTO_HZ
 ROI_Y_START = int(HEIGHT * 0.35)
 
 # Calibration tolerance around picked Lab colour (OpenCV Lab 8-bit)
-# Tune these for your tape/lighting:
 LAB_TOL_L = 40
 LAB_TOL_A = 20
 LAB_TOL_B = 20
@@ -122,7 +121,7 @@ auto_state = {
     "enabled": False,
     "calibration_armed": False,   # UI pressed "Calibrate" and waiting for tap
     "calibrated": False,
-    "lab_mean": None,             # [L,a,b] OpenCV Lab8 of picked line colour
+    "lab_mean": None,             # [L,a,b] OpenCV Lab8 of picked line colour (tap calibration)
     "lab_lower": None,            # list[int,int,int]
     "lab_upper": None,            # list[int,int,int]
     "decision": "IDLE",
@@ -171,7 +170,7 @@ HTML = """<!doctype html>
     .cluster.left{justify-items:start;} .cluster.right{justify-items:end;}
 
     .pad{pointer-events:auto;background:var(--panel2);border:1px solid var(--stroke);border-radius:14px;padding:10px;display:grid;gap:10px;
-      width:min(46vw,340px);user-select:none;touch-action:none;backdrop-filter:blur(6px);}
+      width:min(46vw,360px);user-select:none;touch-action:none;backdrop-filter:blur(6px);}
     .row{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;} .row.two{grid-template-columns:1fr 1fr;}
 
     button.btn{
@@ -203,6 +202,21 @@ HTML = """<!doctype html>
     .telemetry .kv{display:flex; justify-content:space-between; gap:10px;}
     .telemetry .kv span:last-child{font-variant-numeric: tabular-nums;}
 
+    /* Manual LAB input */
+    .labBox{display:grid; gap:8px;}
+    .labGrid{display:grid; grid-template-columns:repeat(3, 1fr); gap:8px;}
+    .labGrid input{
+      width:100%;
+      height:40px;
+      border-radius:10px;
+      border:1px solid var(--stroke);
+      background:rgba(255,255,255,0.08);
+      color:var(--text);
+      padding:6px 8px;
+      font-weight:700;
+    }
+    .labLabel{font-size:12px; color:var(--muted); margin-top:2px;}
+
     @media (orientation: portrait){ .hint::after{content:" (rotate phone to landscape)";} }
   </style>
 </head>
@@ -221,7 +235,7 @@ HTML = """<!doctype html>
         <img id="stream" src="/mjpg" alt="stream" />
       </div>
 
-      <div class="hint">Manual: arrows + C + Space • Auto: Calibrate then Start Auto • Tap the line during calibration</div>
+      <div class="hint">Manual: arrows + C + Space • Auto: Calibrate OR Set LAB then Start Auto • Tap the line during calibration</div>
 
       <div class="telemetry">
           <div class="kv"><span class="muted">Mode</span><span id="mode">—</span></div>
@@ -246,10 +260,33 @@ HTML = """<!doctype html>
               <button class="btn" id="center">C</button>
               <button class="btn" id="right">▶</button>
             </div>
+
             <div class="row two">
               <button class="btn warn" id="calibrate">CALIBRATE</button>
               <button class="btn" id="startAuto">START AUTO</button>
             </div>
+
+            <!-- Manual LAB range inputs -->
+            <div class="labBox">
+              <div class="labLabel">Manual LAB range (0–255)</div>
+
+              <div class="labLabel">Lower [L, a, b]</div>
+              <div class="labGrid">
+                <input id="labL0" type="number" min="0" max="255" value="0">
+                <input id="labA0" type="number" min="0" max="255" value="0">
+                <input id="labB0" type="number" min="0" max="255" value="0">
+              </div>
+
+              <div class="labLabel">Upper [L, a, b]</div>
+              <div class="labGrid">
+                <input id="labL1" type="number" min="0" max="255" value="255">
+                <input id="labA1" type="number" min="0" max="255" value="255">
+                <input id="labB1" type="number" min="0" max="255" value="255">
+              </div>
+
+              <button class="btn warn" id="setLab">SET LAB RANGE</button>
+            </div>
+
             <div class="row two">
               <button class="btn brake" id="eStop">E-STOP</button>
               <button class="btn" id="stopAuto">STOP AUTO</button>
@@ -420,6 +457,30 @@ HTML = """<!doctype html>
     await apiPost("/api/emergency_stop");
   });
 
+  // Manual LAB set (no tap)
+  document.getElementById("setLab").addEventListener("click", async (e) => {
+    e.preventDefault();
+
+    const lower = [
+      Number(document.getElementById("labL0").value),
+      Number(document.getElementById("labA0").value),
+      Number(document.getElementById("labB0").value),
+    ];
+    const upper = [
+      Number(document.getElementById("labL1").value),
+      Number(document.getElementById("labA1").value),
+      Number(document.getElementById("labB1").value),
+    ];
+
+    const js = await apiPost("/api/lab/set", { lab_lower: lower, lab_upper: upper });
+
+    // If user sets manually, stop waiting for tap
+    if (js && js.ok) {
+      calibrationArmed = false;
+      tapHintEl.style.display = "none";
+    }
+  });
+
   // Tap on video to pick the line colour (during calibration)
   streamImg.addEventListener("click", async (e) => {
     if (!calibrationArmed) return;
@@ -501,6 +562,22 @@ def detect_local_ips():
         pass
     ips.discard("127.0.0.1")
     return sorted(ips)
+
+def _parse_lab3(x, name="lab"):
+    """
+    Accepts [L,a,b] and returns 3 clipped ints in 0..255.
+    Raises ValueError on invalid input.
+    """
+    if not isinstance(x, (list, tuple)) or len(x) != 3:
+        raise ValueError(f"{name} must be a list of 3 numbers: [L,a,b]")
+    out = []
+    for i, v in enumerate(x):
+        try:
+            iv = int(v)
+        except Exception:
+            raise ValueError(f"{name}[{i}] must be a number")
+        out.append(max(0, min(255, iv)))
+    return out
 
 # -------------------------
 # Camera: 1x ffmpeg producer -> latest JPEG buffer -> MJPEG clients (drop frames)
@@ -1097,12 +1174,38 @@ def api_calibrate_pick():
 
     return jsonify(ok=True, lab_mean=[L, a, b], lab_lower=lower, lab_upper=upper)
 
+# NEW: Manual LAB range set (user inputs lower/upper)
+@app.post("/api/lab/set")
+def api_lab_set():
+    data = request.get_json(force=True, silent=True) or {}
+
+    try:
+        lower = _parse_lab3(data.get("lab_lower"), "lab_lower")
+        upper = _parse_lab3(data.get("lab_upper"), "lab_upper")
+    except ValueError as e:
+        return jsonify(ok=False, msg=str(e)), 400
+
+    # Ensure lower <= upper per channel (swap if reversed)
+    for i in range(3):
+        if lower[i] > upper[i]:
+            lower[i], upper[i] = upper[i], lower[i]
+
+    with auto_lock:
+        auto_state["lab_mean"] = None  # unknown when manually set
+        auto_state["lab_lower"] = lower
+        auto_state["lab_upper"] = upper
+        auto_state["calibrated"] = True
+        auto_state["calibration_armed"] = False
+        auto_state["decision"] = "LAB SET MANUAL"
+
+    return jsonify(ok=True, lab_lower=lower, lab_upper=upper)
+
 @app.post("/api/autopilot/start")
 def api_autopilot_start():
     with auto_lock:
         if not auto_state["calibrated"]:
-            auto_state["decision"] = "CALIBRATE FIRST"
-            return jsonify(ok=False, msg="Calibrate first."), 400
+            auto_state["decision"] = "CALIBRATE OR SET LAB"
+            return jsonify(ok=False, msg="Calibrate (tap) or set LAB range first."), 400
         auto_state["enabled"] = True
         auto_state["decision"] = "AUTO START"
         auto_state["last_line_seen"] = time.perf_counter()
