@@ -271,12 +271,11 @@ def main():
     ap = argparse.ArgumentParser()
     # Requested defaults:
     ap.add_argument("--model", default="yolov5n.onnx", help="Path to yolov5n.onnx")
-    ap.add_argument("--source", default="0", help="Camera index like 0, or a video path, or a URL")
+    ap.add_argument("--source", default="/dev/video4", help="Camera index like 0, or a video path, or a URL")
     ap.add_argument("--host", default="0.0.0.0", help="Streaming bind host")
 
     # Ask port at runtime unless user provides --port
     ap.add_argument("--port", type=int, default=None, help="Streaming port (if omitted, prompt at startup)")
-
     ap.add_argument("--imgsz", type=int, default=640, help="Inference size (usually 640)")
     ap.add_argument("--conf", type=float, default=0.25, help="Confidence threshold")
     ap.add_argument("--iou", type=float, default=0.45, help="NMS IoU threshold")
@@ -294,8 +293,18 @@ def main():
 
     net = cv2.dnn.readNetFromONNX(args.model)
 
-    src = int(args.source) if str(args.source).isdigit() else args.source
-    cap = cv2.VideoCapture(src)
+    # Allow camera as index "0" or as device path "/dev/video4"
+    s = str(args.source)
+
+    if s.startswith("/dev/video"):
+        src = s
+    elif s.isdigit():
+        src = int(s)
+    else:
+        src = s
+
+    # Prefer V4L2 on Linux (reduces GStreamer issues)
+    cap = cv2.VideoCapture(src, cv2.CAP_V4L2)
     if not cap.isOpened():
         raise RuntimeError(f"Failed to open video source: {args.source}")
 
