@@ -319,6 +319,8 @@ def main():
     cap = cv2.VideoCapture(src, cv2.CAP_V4L2)
     if not cap.isOpened():
         raise RuntimeError(f"Failed to open video source: {args.source}")
+        t_cap = threading.Thread(target=capture_worker, args=(cap,), daemon=True)
+        t_cap.start()
 
     # Reduce camera buffering if supported
     try:
@@ -349,9 +351,11 @@ def main():
 
     try:
         while True:
-            ok, frame = cap.read()
-            if not ok or frame is None:
-                time.sleep(0.01)
+            with _frame_lock:
+                frame = None if _latest_frame is None else _latest_frame.copy()
+
+            if frame is None:
+                time.sleep(0.005)
                 continue
 
             detections = detect_yolov5_opencv(
