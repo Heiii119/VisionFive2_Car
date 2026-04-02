@@ -15,7 +15,7 @@ import numpy as np
 _latest_jpeg = None
 _latest_seq = 0
 _latest_ts = 0.0
-_latest_cond = threading.Condition()  # condition variable = wait for new frame
+_latest_cond = threading.Condition()
 
 BOUNDARY = "frame"
 
@@ -23,7 +23,6 @@ class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
 
 def _detect_local_ip():
-    # Helpful for printing a usable URL when binding to 0.0.0.0
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
@@ -37,7 +36,6 @@ class StreamHandler(BaseHTTPRequestHandler):
     server_version = "YOLOMJPEG/1.0"
 
     def log_message(self, fmt, *args):
-        # quieter logs
         return
 
     def do_GET(self):
@@ -91,19 +89,17 @@ class StreamHandler(BaseHTTPRequestHandler):
                         if _latest_jpeg is None:
                             _latest_cond.wait(timeout=1.0)
 
-                        # If no new frame yet, wait (prevents tight loop)
                         while _latest_seq == last_seq:
                             _latest_cond.wait(timeout=1.0)
 
                         jpg = _latest_jpeg
                         seq = _latest_seq
-                        # ts = _latest_ts  # if you want to use it
+
                     if jpg is None:
                         continue
 
                     last_seq = seq
 
-                    # Write one multipart frame part (manual headers for safety)
                     self.wfile.write(f"--{BOUNDARY}\r\n".encode("ascii"))
                     self.wfile.write(b"Content-Type: image/jpeg\r\n")
                     self.wfile.write(f"Content-Length: {len(jpg)}\r\n\r\n".encode("ascii"))
@@ -124,6 +120,24 @@ def start_stream_server(host, port):
     t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()
     return server
+
+def prompt_port(default_port=9090):
+    while True:
+        try:
+            s = input(f"Enter streaming port (1-65535) [default {default_port}]: ").strip()
+        except EOFError:
+            # If running non-interactively, fall back to default
+            return int(default_port)
+
+        if s == "":
+            return int(default_port)
+
+        if s.isdigit():
+            p = int(s)
+            if 1 <= p <= 65535:
+                return p
+
+        print("Invalid port. Example valid ports: 8080, 9090, 5000.")
 
 # ----------------------------
 # YOLOv5 helpers
@@ -255,14 +269,18 @@ def draw_detections(frame, detections, class_names=None):
 # ----------------------------
 def main():
     ap = argparse.ArgumentParser()
+    # Requested defaults:
     ap.add_argument("--model", default="yolov5n.onnx", help="Path to yolov5n.onnx")
     ap.add_argument("--source", default="0", help="Camera index like 0, or a video path, or a URL")
+    ap.add_argument("--host", default="0.0.0.0", help="Streaming bind host")
+
+    # Ask port at runtime unless user provides --port
+    ap.add_argument("--port", type=int, default=None, help="Streaming port (if omitted, prompt at startup)")
+
     ap.add_argument("--imgsz", type=int, default=640, help="Inference size (usually 640)")
     ap.add_argument("--conf", type=float, default=0.25, help="Confidence threshold")
     ap.add_argument("--iou", type=float, default=0.45, help="NMS IoU threshold")
     ap.add_argument("--names", default="", help="Optional path to class names file (coco.names)")
-    ap.add_argument("--host", default="0.0.0.0", help="Streaming bind host")
-    ap.add_argument("--port", type=int, default=8080, help="Streaming port")
     ap.add_argument("--jpeg_quality", type=int, default=80, help="JPEG quality 1-100")
     ap.add_argument("--show_local", action="store_true", help="Show local preview window (needs GUI)")
     ap.add_argument("--cap_width", type=int, default=0, help="Optional capture width (0 = default)")
@@ -270,16 +288,18 @@ def main():
     ap.add_argument("--cap_fps", type=int, default=0, help="Optional capture fps (0 = default)")
     args = ap.parse_args()
 
+    port = args.port if args.port is not None else prompt_port(default_port=9090)
+
     class_names = load_class_names(args.names) if args.names else None
 
     net = cv2.dnn.readNetFromONNX(args.model)
 
-    src = int(args.source) if args.source.isdigit() else args.source
+    src = int(args.source) if str(args.source).isdigit() else args.source
     cap = cv2.VideoCapture(src)
     if not cap.isOpened():
         raise RuntimeError(f"Failed to open video source: {args.source}")
 
-    # Reduce camera buffering if supported (helps latency)
+    # Reduce camera buffering if supported
     try:
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     except Exception:
@@ -292,11 +312,11 @@ def main():
         cap.set(cv2.CAP_PROP_FPS, args.cap_fps)
 
     # Start server
-    start_stream_server(args.host, args.port)
+    start_stream_server(args.host, port)
 
     ip_for_print = _detect_local_ip() if args.host == "0.0.0.0" else args.host
-    print(f"Streaming page: http://{ip_for_print}:{args.port}/")
-    print(f"MJPEG endpoint: http://{ip_for_print}:{args.port}/mjpeg")
+    print(f"Streaming page: http://{ip_for_print}:{port}/")
+    print(f"MJPEG endpoint: http://{ip_for_print}:{port}/mjpeg")
 
     encode_params = [int(cv2.IMWRITE_JPEG_QUALITY), int(args.jpeg_quality)]
 
