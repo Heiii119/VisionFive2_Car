@@ -16,6 +16,7 @@ _latest_jpeg = None
 _latest_seq = 0
 _latest_ts = 0.0
 _latest_cond = threading.Condition()
+
 _latest_frame = None
 _frame_lock = threading.Lock()
 
@@ -35,7 +36,7 @@ def _detect_local_ip():
         return "127.0.0.1"
 
 class StreamHandler(BaseHTTPRequestHandler):
-    server_version = "YOLOMJPEG/1.0"
+    server_version = "YOLOMJPEG/1.1"
 
     def log_message(self, fmt, *args):
         return
@@ -46,20 +47,20 @@ class StreamHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
-            html = f"""<!doctype html>
+            html = """<!doctype html>
 <html>
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>YOLOv5 MJPEG Stream</title>
     <style>
-      body {{ font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 12px; }}
-      img {{ max-width: 100%; height: auto; background: #000; }}
-      code {{ background: #f2f2f2; padding: 2px 6px; border-radius: 6px; }}
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 12px; }
+      img { max-width: 100%; height: auto; background: #000; }
+      code { background: #f2f2f2; padding: 2px 6px; border-radius: 6px; }
     </style>
   </head>
   <body>
-    <h2>YOLOv5 MJPEG Stream (Latest-Frame, Low-Latency)</h2>
+    <h2>YOLOv5 MJPEG Stream (Latest-Frame)</h2>
     <p>Stream endpoint: <code>/mjpeg</code></p>
     <img src="/mjpeg" />
   </body>
@@ -80,19 +81,20 @@ class StreamHandler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
             self.send_header("Pragma", "no-cache")
             self.send_header("Content-Type", f"multipart/x-mixed-replace; boundary={BOUNDARY}")
+            self.send_header("X-Accel-Buffering", "no")
             self.end_headers()
 
             last_seq = -1
-
             try:
                 while True:
-                    # Wait for a NEW frame (sequence number changes)
                     with _latest_cond:
+                        # Wait until we have at least one frame
                         if _latest_jpeg is None:
-                            _latest_cond.wait(timeout=1.0)
+                            _latest_cond.wait(timeout=0.2)
 
+                        # Wait for a NEW frame (sequence number changes)
                         while _latest_seq == last_seq:
-                            _latest_cond.wait(timeout=1.0)
+                            _latest_cond.wait(timeout=0.2)
 
                         jpg = _latest_jpeg
                         seq = _latest_seq
@@ -128,7 +130,6 @@ def prompt_port(default_port=9090):
         try:
             s = input(f"Enter streaming port (1-65535) [default {default_port}]: ").strip()
         except EOFError:
-            # If running non-interactively, fall back to default
             return int(default_port)
 
         if s == "":
@@ -268,7 +269,6 @@ def draw_detections(frame, detections, class_names=None):
 
 def capture_worker(cap):
     global _latest_frame
-    n = 0
     while True:
         ok, frame = cap.read()
         if not ok or frame is None:
@@ -276,42 +276,58 @@ def capture_worker(cap):
             continue
         with _frame_lock:
             _latest_frame = frame
-        n += 1
-        if n % 60 == 0:
-            print("capture+worker: frame", frame.shape)
-            
+
 # ----------------------------
 # Main
 # ----------------------------
 def main():
     ap = argparse.ArgumentParser()
-    # Requested defaults:
     ap.add_argument("--model", default="yolov5n.onnx", help="Path to yolov5n.onnx")
     ap.add_argument("--source", default="/dev/video4", help="Camera index like 0, or a video path, or a URL")
     ap.add_argument("--host", default="0.0.0.0", help="Streaming bind host")
 
-    # Ask port at runtime unless user provides --port
     ap.add_argument("--port", type=int, default=None, help="Streaming port (if omitted, prompt at startup)")
-    ap.add_argument("--imgsz", type=int, default=640, help="Inference size (usually 640)")
+    ap.add_argument("--imgsz", type=int, default=320, help="Inference size (smaller = faster, e.g. 256/320/416/640)")
     ap.add_argument("--conf", type=float, default=0.25, help="Confidence threshold")
     ap.add_argument("--iou", type=float, default=0.45, help="NMS IoU threshold")
     ap.add_argument("--names", default="", help="Optional path to class names file (coco.names)")
-    ap.add_argument("--jpeg_quality", type=int, default=60, help="JPEG quality 1-100")
+
+    ap.add_argument("--jpeg_quality", type=int, default=35, help="JPEG quality 1-100 (lower = faster)")
+    ap.add_argument("--stream_fps", type=float, default=10.0, help="Max MJPEG output FPS (lower = less CPU/latency)")
+    ap.add_argument("--detect_every", type=int, default=4,
+                    help="Run detection every N streamed frames (1=every frame). Higher = faster.")
+
     ap.add_argument("--show_local", action="store_true", help="Show local preview window (needs GUI)")
-    ap.add_argument("--cap_width", type=int, default=320, help="Optional capture width (0 = default)")
-    ap.add_argument("--cap_height", type=int, default=240, help="Optional capture height (0 = default)")
-    ap.add_argument("--cap_fps", type=int, default=0, help="Optional capture fps (0 = default)")
+
+    ap.add_argument("--cap_width", type=int, default=320, help="Capture width (smaller = faster)")
+    ap.add_argument("--cap_height", type=int, default=240, help="Capture height (smaller = faster)")
+    ap.add_argument("--cap_fps", type=int, default=10, help="Capture fps (smaller = less CPU)")
+    ap.add_argument("--mjpg_fourcc", action="store_true",
+                    help="Request camera output as MJPG (often faster on USB cams)")
+
+    ap.add_argument("--cv_threads", type=int, default=0,
+                    help="OpenCV threads (0=default). Try 1 or 2 on small CPUs.")
+
     args = ap.parse_args()
 
     port = args.port if args.port is not None else prompt_port(default_port=9090)
 
-    class_names = load_class_names(args.names) if args.names else None
+    # OpenCV speed knobs
+    try:
+        cv2.setUseOptimized(True)
+    except Exception:
+        pass
+    if args.cv_threads and args.cv_threads > 0:
+        try:
+            cv2.setNumThreads(int(args.cv_threads))
+        except Exception:
+            pass
 
+    class_names = load_class_names(args.names) if args.names else None
     net = cv2.dnn.readNetFromONNX(args.model)
 
     # Allow camera as index "0" or as device path "/dev/video4"
     s = str(args.source)
-
     if s.startswith("/dev/video"):
         src = s
     elif s.isdigit():
@@ -329,14 +345,22 @@ def main():
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     except Exception:
         pass
-    if args.cap_width:
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.cap_width)
-    if args.cap_height:
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.cap_height)
-    if args.cap_fps:
-        cap.set(cv2.CAP_PROP_FPS, args.cap_fps)
 
-    # Start capture thread (THIS WAS MISSING due to indentation)
+    # Request MJPG from camera (if supported)
+    if args.mjpg_fourcc:
+        try:
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        except Exception:
+            pass
+
+    if args.cap_width and args.cap_width > 0:
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, int(args.cap_width))
+    if args.cap_height and args.cap_height > 0:
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(args.cap_height))
+    if args.cap_fps and args.cap_fps > 0:
+        cap.set(cv2.CAP_PROP_FPS, float(args.cap_fps))
+
+    # Start capture thread (latest frame always updated)
     t_cap = threading.Thread(target=capture_worker, args=(cap,), daemon=True)
     t_cap.start()
 
@@ -347,8 +371,16 @@ def main():
     print(f"Streaming page: http://{ip_for_print}:{port}/")
     print(f"MJPEG endpoint: http://{ip_for_print}:{port}/mjpeg")
 
-    encode_params = [int(cv2.IMWRITE_JPEG_QUALITY), int(args.jpeg_quality)]
+    encode_params = [int(cv2.IMWRITE_JPEG_QUALITY), int(max(1, min(100, args.jpeg_quality)))]
 
+    # Stream/inference scheduling
+    stream_period = 1.0 / max(0.1, float(args.stream_fps))
+    next_stream_time = time.time()
+
+    stream_frame_i = 0
+    last_detections = []
+
+    # FPS overlay based on streamed frames
     fps_t0 = time.time()
     fps_frames = 0
     last_fps = 0.0
@@ -357,6 +389,13 @@ def main():
 
     try:
         while True:
+            # Wait until it's time to emit next MJPEG frame
+            now = time.time()
+            if now < next_stream_time:
+                time.sleep(min(0.005, next_stream_time - now))
+                continue
+
+            # Grab most recent frame
             with _frame_lock:
                 frame = None if _latest_frame is None else _latest_frame.copy()
 
@@ -364,18 +403,23 @@ def main():
                 time.sleep(0.005)
                 continue
 
-            detections = detect_yolov5_opencv(
-                net,
-                frame,
-                conf_thres=args.conf,
-                iou_thres=args.iou,
-                input_size=args.imgsz,
-            )
+            stream_frame_i += 1
 
-            annotated = frame.copy()
-            draw_detections(annotated, detections, class_names=class_names)
+            # Run YOLO less often
+            if max(1, args.detect_every) == 1 or (stream_frame_i % max(1, args.detect_every) == 0):
+                last_detections = detect_yolov5_opencv(
+                    net,
+                    frame,
+                    conf_thres=args.conf,
+                    iou_thres=args.iou,
+                    input_size=args.imgsz,
+                )
 
-            # FPS overlay
+            # Annotate on the copied frame (no extra .copy())
+            annotated = frame
+            draw_detections(annotated, last_detections, class_names=class_names)
+
+            # FPS overlay (stream FPS)
             fps_frames += 1
             dt = time.time() - fps_t0
             if dt >= 1.0:
@@ -385,15 +429,15 @@ def main():
 
             cv2.putText(
                 annotated,
-                f"FPS: {last_fps:.1f}  det: {len(detections)}",
+                f"StreamFPS: {last_fps:.1f}  det: {len(last_detections)}  every:{max(1,args.detect_every)}",
                 (10, 25),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
+                0.6,
                 (255, 0, 0),
                 2,
             )
 
-            # Encode once; all clients receive this latest JPEG
+            # Encode JPEG
             ok2, jpg = cv2.imencode(".jpg", annotated, encode_params)
             if ok2:
                 payload = jpg.tobytes()
@@ -402,13 +446,14 @@ def main():
                     _latest_seq += 1
                     _latest_ts = time.time()
                     _latest_cond.notify_all()
-            # debug
-            print("main: jpeg bytes", len(payload), "seq", _latest_seq)
 
             if args.show_local:
                 cv2.imshow("YOLOv5 Stream", annotated)
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     break
+
+            # Schedule next stream frame time (prevents CPU pegging)
+            next_stream_time = time.time() + stream_period
 
     finally:
         cap.release()
