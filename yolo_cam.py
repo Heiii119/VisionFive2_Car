@@ -16,6 +16,8 @@ _latest_jpeg = None
 _latest_seq = 0
 _latest_ts = 0.0
 _latest_cond = threading.Condition()
+_latest_frame = None
+_frame_lock = threading.Lock()
 
 BOUNDARY = "frame"
 
@@ -264,6 +266,16 @@ def draw_detections(frame, detections, class_names=None):
         cv2.putText(frame, label, (x1, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
     return frame
 
+def capture_worker(cap):
+    global _latest_frame
+    while True:
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            time.sleep(0.005)
+            continue
+        with _frame_lock:
+            _latest_frame = frame
+            
 # ----------------------------
 # Main
 # ----------------------------
