@@ -25,7 +25,7 @@ DEVICE = "/dev/video4"
 WIDTH = 320
 HEIGHT = 240
 FPS = 10
-PORT = 7070
+PORT = 8180
 
 # =========================
 # PCA9685 / PWM CONFIG
