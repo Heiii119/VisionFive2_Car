@@ -166,21 +166,30 @@ kill -9 <PID>
 ## Step 9: Autopilot
 
 ## yolo 
-#### 1) install yolo on computer:
+#### 1) install dependencies and PyTorch
+```bash
+sudo apt update
+sudo apt install python3-pip git
+pip3 install --upgrade pip
+pip3 install numpy matplotlib pyyaml tqdm
+pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+```
+
+#### 2) install yolo:
 ```bash
 git clone https://github.com/ultralytics/yolov5
 cd yolov5
-pip install -r requirements.txt oonx oonxsim
+pip3 install -r requirements.txt oonx oonxsim
 python export.py --weights yolov5n.pt --include onnx --imgsz 640 --batch-size 1 --opset 11
 ```
-#### 2) transfer the file to the board
-```bash
-scp yolov5n_cv.onnx user@<board-ip>:~/VisionFive2_Car/
+
 ```
 #### 3) run the demo
 ```bash
 python3 yolo_cam.py
 ```
+
+
 
 ## Step 777: AI module (for Starfive AI Module)
 ### 6.0 Preperation: https://doc.rvspace.org/VisionFive2/Application_Notes/AI_Kit/VisionFive_2/complie_ai.html
