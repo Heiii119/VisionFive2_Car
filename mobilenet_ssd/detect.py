@@ -1,39 +1,58 @@
 import cv2
+import numpy as np
 
-modelPath = "ssd_mobilenet_v3_large_coco_2020_01_14/frozen_inference_graph.pb"
+CLASSES = ["background", "aeroplane", "bicycle", "bird", "boat",
+           "bottle", "bus", "car", "cat", "chair", "cow", "diningtable",
+           "dog", "horse", "motorbike", "person", "pottedplant",
+           "sheep", "sofa", "train", "tvmonitor"]
 
-net = cv2.dnn.readNet(modelPath)
+net = cv2.dnn.readNetFromCaffe(
+    "MobileNetSSD_deploy.prototxt",
+    "MobileNetSSD_deploy.caffemodel"
+)
 
-cap = cv2.VideoCapture(4)
+cap = cv2.VideoCapture(0)
+
+if not cap.isOpened():
+    print("Camera not detected!")
+    exit()
 
 while True:
     ret, frame = cap.read()
     if not ret:
         break
 
+    (h, w) = frame.shape[:2]
+
     blob = cv2.dnn.blobFromImage(
-        frame,
-        size=(320, 320),
-        swapRB=True,
-        crop=False
+        cv2.resize(frame, (300, 300)),
+        0.007843,
+        (300, 300),
+        127.5
     )
 
     net.setInput(blob)
     detections = net.forward()
 
-    h, w = frame.shape[:2]
-
     for i in range(detections.shape[2]):
         confidence = detections[0, 0, i, 2]
+
         if confidence > 0.5:
-            x1 = int(detections[0, 0, i, 3] * w)
-            y1 = int(detections[0, 0, i, 4] * h)
-            x2 = int(detections[0, 0, i, 5] * w)
-            y2 = int(detections[0, 0, i, 6] * h)
+            idx = int(detections[0, 0, i, 1])
+            box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
+            (startX, startY, endX, endY) = box.astype("int")
 
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0,255,0), 2)
+            label = f"{CLASSES[idx]}: {confidence:.2f}"
 
-    cv2.imshow("Detection", frame)
+            cv2.rectangle(frame, (startX, startY),
+                          (endX, endY), (0, 255, 0), 2)
+
+            cv2.putText(frame, label,
+                        (startX, startY - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5, (0, 255, 0), 2)
+
+    cv2.imshow("MobileNet-SSD Detection", frame)
 
     if cv2.waitKey(1) & 0xFF == 27:
         break
