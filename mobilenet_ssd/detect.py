@@ -4,7 +4,7 @@ modelPath = "ssd_mobilenet_v3_large_coco_2020_01_14/frozen_inference_graph.pb"
 
 net = cv2.dnn.readNet(modelPath)
 
-cap = cv2.VideoCapture(0)
+cap = cv2.VideoCapture(4)
 
 while True:
     ret, frame = cap.read()
