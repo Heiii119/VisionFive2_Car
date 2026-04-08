@@ -11,7 +11,7 @@ net = cv2.dnn.readNetFromCaffe(
     "MobileNetSSD_deploy.caffemodel"
 )
 
-cap = cv2.VideoCapture(0)
+cap = cv2.VideoCapture(4)
 
 if not cap.isOpened():
     print("Camera not detected!")
