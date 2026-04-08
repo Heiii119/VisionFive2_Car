@@ -188,6 +188,9 @@ python export.py --weights yolov5n.pt --include onnx --imgsz 640 --batch-size 1 
 ```bash
 python3 yolo_cam.py
 ```
+## MobileNet SSD
+### 1) install weight file
+### 2) 
 
 
 
