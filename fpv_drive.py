@@ -675,7 +675,7 @@ def control_loop():
 # -------------------------
 @app.get("/")
 def index():
-    return render_template_string(HTML, device=DEVICE, w=WIDTH, h=HEIGHT, fps=FPS)
+    return render_template_string(HTML)
 
 @app.get("/mjpg")
 def mjpg():
