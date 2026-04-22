@@ -16,7 +16,7 @@ import numpy as np
 DEVICE = "/dev/video4"
 WIDTH = 320
 HEIGHT = 240
-FPS = 10
+FPS = 6
 PORT = 6077
 
 # =========================
@@ -175,6 +175,8 @@ def iter_jpegs(stream):
 # CAMERA WORKER (AI INCLUDED)
 # =========================
 def camera_worker():
+    frame_count = 0
+    last_label = ""
     global _latest_jpeg, _latest_seq, net
 
     while not _camera_stop.is_set():
@@ -188,9 +190,11 @@ def camera_worker():
 
             label_text = ""
 
-            if AI_ENABLED and net is not None:
+            frame_count += 1
 
-                img = cv2.resize(frame, (INPUT_WIDTH, INPUT_HEIGHT))
+            if AI_ENABLED and net is not None and frame_count % 4 == 0:
+
+                img = cv2.resize(frame, (160, 160))  # smaller input!
                 img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
                 img = img.astype(np.float32) / 255.0
                 img = np.expand_dims(img, axis=0)
@@ -202,7 +206,7 @@ def camera_worker():
                 confidence = float(output[class_id])
                 label = CLASS_NAMES[class_id]
 
-                label_text = f"{label} ({confidence:.2f})"
+                last_label = f"{label} ({confidence:.2f})"
 
                 if confidence > 0.75:
                     with state_lock:
@@ -221,6 +225,7 @@ def camera_worker():
                         elif label == "turn":
                             control_state["left"] = True
 
+            label_text = last_label
             if label_text:
                 cv2.putText(frame, label_text, (10,30),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7,
