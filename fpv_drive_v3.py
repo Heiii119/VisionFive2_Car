@@ -9,11 +9,34 @@ import signal
 # =========================
 # Camera config
 # =========================
-DEVICE = "/dev/video4"      # ✅ FIXED (was missing)
+DEVICE = "/dev/video4"
 WIDTH = 320
 HEIGHT = 240
-FPS = 10                    # ✅ 3 is too low for smooth stream
+FPS = 10
 PORT = 6060
+
+# =========================
+# PCA9685 / PWM CONFIG
+# =========================
+PCA9685_ADDR = 0x40
+PCA9685_FREQ = 60
+I2C_BUS = 0
+
+THROTTLE_CHANNEL = 0
+STEERING_CHANNEL = 1
+
+THROTTLE_STOPPED_TICKS = 370
+THROTTLE_FORWARD_TICKS = 415
+THROTTLE_REVERSE_TICKS = 305
+
+STEERING_CENTER_TICKS = 380
+STEERING_MIN_TICKS = 305
+STEERING_MAX_TICKS = 480
+
+STEP = 5
+STEERING_STEP = 25
+
+FAILSAFE_TIMEOUT_SEC = 0.35
 
 # =========================
 # Flask
@@ -21,7 +44,7 @@ PORT = 6060
 app = Flask(__name__)
 
 # =========================
-# HTML (dual joystick layout)
+# HTML UI
 # =========================
 HTML = """<!doctype html>
 <html>
@@ -31,28 +54,18 @@ HTML = """<!doctype html>
 content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"/>
 <title>FPV Dual Joystick</title>
 <style>
-html,body{
-margin:0;padding:0;height:100%;
-background:#000;overflow:hidden;
-touch-action:none;user-select:none;
--webkit-user-select:none;
-}
+html,body{margin:0;padding:0;height:100%;background:#000;overflow:hidden;touch-action:none;}
 .wrap{display:flex;height:100%;width:100%;}
 .joyPanel{flex:1;display:flex;align-items:center;justify-content:center;background:#111;}
 .videoPanel{flex:2;display:flex;align-items:center;justify-content:center;background:#000;}
 .videoPanel img{width:100%;height:100%;object-fit:contain;}
-.joystick{
-width:180px;height:180px;border-radius:50%;
+.joystick{width:180px;height:180px;border-radius:50%;
 background:rgba(255,255,255,0.08);
-border:2px solid rgba(255,255,255,0.2);
-position:relative;
-}
-.knob{
-width:70px;height:70px;border-radius:50%;
+border:2px solid rgba(255,255,255,0.2);position:relative;}
+.knob{width:70px;height:70px;border-radius:50%;
 background:rgba(0,255,120,0.8);
 position:absolute;left:50%;top:50%;
-transform:translate(-50%,-50%);
-}
+transform:translate(-50%,-50%);}
 </style>
 </head>
 <body>
@@ -90,7 +103,7 @@ const dx=x-rect.left-radius;
 const dy=y-rect.top-radius;
 const max=radius-35;
 const dist=Math.sqrt(dx*dx+dy*dy);
-let nx=dx, ny=dy;
+let nx=dx,ny=dy;
 if(dist>max){nx=dx/dist*max;ny=dy/dist*max;}
 knob.style.left=(radius+nx)+"px";
 knob.style.top=(radius+ny)+"px";
@@ -130,12 +143,25 @@ setupJoystick(document.getElementById("throttleJoy"),"throttle");
 """
 
 # =========================
+# Control State
+# =========================
+state_lock = threading.Lock()
+control_state = {
+    "up": False,
+    "down": False,
+    "left": False,
+    "right": False,
+    "center": False,
+    "brake": False,
+    "last_seen": 0.0,
+}
+
+# =========================
 # Camera streaming
 # =========================
 _latest_lock = threading.Lock()
 _latest_jpeg = None
 _latest_seq = 0
-_camera_stop = threading.Event()
 
 def ffmpeg_jpeg_pipe():
     cmd = [
@@ -152,12 +178,8 @@ def ffmpeg_jpeg_pipe():
         "-f", "image2pipe",
         "pipe:1",
     ]
-    return subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        bufsize=0
-    )
+    return subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL, bufsize=0)
 
 def iter_jpegs(stream):
     buf=bytearray()
@@ -178,7 +200,7 @@ def iter_jpegs(stream):
 
 def camera_worker():
     global _latest_jpeg,_latest_seq
-    while not _camera_stop.is_set():
+    while True:
         p=ffmpeg_jpeg_pipe()
         try:
             for jpg in iter_jpegs(p.stdout):
@@ -206,35 +228,73 @@ def mjpeg_generator():
                f"Content-Length: {len(jpg)}\r\n\r\n".encode()+
                jpg+b"\r\n")
 
+# =========================
+# PWM (Simple Direct Logic)
+# =========================
+from smbus2 import SMBus
+
+bus = SMBus(I2C_BUS)
+
+def clamp(v,a,b): return max(a,min(b,v))
+
+def set_pwm(channel,value):
+    value=int(clamp(value,0,4095))
+    base=0x06+4*channel
+    bus.write_byte_data(PCA9685_ADDR,base,value&0xFF)
+    bus.write_byte_data(PCA9685_ADDR,base+1,(value>>8)&0xFF)
+    bus.write_byte_data(PCA9685_ADDR,base+2,0)
+    bus.write_byte_data(PCA9685_ADDR,base+3,0)
+
+throttle=THROTTLE_STOPPED_TICKS
+steering=STEERING_CENTER_TICKS
+
+def control_loop():
+    global throttle,steering
+    while True:
+        time.sleep(0.02)
+        with state_lock:
+            s=dict(control_state)
+        if time.perf_counter()-s["last_seen"]>FAILSAFE_TIMEOUT_SEC:
+            s["brake"]=True
+        if s["brake"]:
+            throttle=THROTTLE_STOPPED_TICKS
+        elif s["up"]:
+            throttle=clamp(throttle+STEP,THROTTLE_REVERSE_TICKS,THROTTLE_FORWARD_TICKS)
+        elif s["down"]:
+            throttle=clamp(throttle-STEP,THROTTLE_REVERSE_TICKS,THROTTLE_FORWARD_TICKS)
+        if s["center"]:
+            steering=STEERING_CENTER_TICKS
+        elif s["left"]:
+            steering=clamp(steering+STEERING_STEP,STEERING_MIN_TICKS,STEERING_MAX_TICKS)
+        elif s["right"]:
+            steering=clamp(steering-STEERING_STEP,STEERING_MIN_TICKS,STEERING_MAX_TICKS)
+        set_pwm(THROTTLE_CHANNEL,throttle)
+        set_pwm(STEERING_CHANNEL,steering)
+
+# =========================
+# Routes
+# =========================
 @app.get("/")
-def index():
-    return HTML
+def index(): return HTML
 
 @app.get("/mjpg")
 def mjpg():
-    return Response(
-        mjpeg_generator(),
-        mimetype="multipart/x-mixed-replace; boundary=frame"
-    )
+    return Response(mjpeg_generator(),
+                    mimetype="multipart/x-mixed-replace; boundary=frame")
 
 @app.post("/control")
 def control():
+    data=request.get_json(force=True) or {}
+    with state_lock:
+        for k in ["up","down","left","right","center","brake"]:
+            control_state[k]=bool(data.get(k,False))
+        control_state["last_seen"]=time.perf_counter()
     return jsonify(ok=True)
 
-def detect_local_ips():
-    ips=set()
-    try:
-        s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8",80))
-        ips.add(s.getsockname()[0])
-        s.close()
-    except: pass
-    return ips
-
+# =========================
+# Main
+# =========================
 if __name__=="__main__":
-    cam_t=threading.Thread(target=camera_worker,daemon=True)
-    cam_t.start()
-    ips=detect_local_ips()
-    for ip in ips:
-        print(f"http://{ip}:{PORT}/")
+    threading.Thread(target=camera_worker,daemon=True).start()
+    threading.Thread(target=control_loop,daemon=True).start()
     app.run(host="0.0.0.0",port=PORT,threaded=True,use_reloader=False)
