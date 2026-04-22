@@ -12,7 +12,7 @@ import signal
 DEVICE = "/dev/video4"
 WIDTH = 320
 HEIGHT = 240
-FPS = 10
+FPS = 6
 PORT = 6060
 
 # =========================
