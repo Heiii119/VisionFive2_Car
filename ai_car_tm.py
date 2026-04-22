@@ -58,7 +58,7 @@ STEERING_CHANNEL = 1
 
 THROTTLE_STOPPED_TICKS = 370
 THROTTLE_FORWARD_TICKS = 415
-THROTTLE_SLOW_TICKS = 390
+THROTTLE_SLOW_TICKS = 399
 THROTTLE_REVERSE_TICKS = 305
 
 STEERING_LEFT_TICKS   = 280
@@ -146,7 +146,7 @@ def line_follow(frame):
         steer = max(STEERING_MIN_TICKS, min(STEERING_MAX_TICKS, steer))
 
         values["steering"] = steer
-        values["throttle"] = THROTTLE_SLOW_TICKS
+        values["throttle"] = THROTTLE_SLOW_TICKS + 5
     else:
         values["throttle"] = THROTTLE_STOPPED_TICKS
 
