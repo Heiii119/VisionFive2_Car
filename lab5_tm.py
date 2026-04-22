@@ -55,7 +55,7 @@ STEERING_MAX_TICKS = 480
 STEP = 5
 STEERING_STEP = 25
 
-CONTROL_HZ = 60.0
+CONTROL_HZ = 30.0
 CONTROL_DT = 1.0 / CONTROL_HZ
 FAILSAFE_TIMEOUT_SEC = 0.35
 
@@ -231,7 +231,7 @@ def camera_worker():
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7,
                             (0,255,0), 2)
 
-            _, enc = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+            _, enc = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 60])
             jpg = enc.tobytes()
 
             with _latest_lock:
