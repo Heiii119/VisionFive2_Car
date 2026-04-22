@@ -17,7 +17,7 @@ Full System:
 - U-TURN timed maneuver
 """
 
-from flask import Flask, Response, render_template_string, jsonify
+from flask import Flask, Response, render_template_string, jsonify, request
 import subprocess
 import time
 import threading
@@ -39,9 +39,6 @@ MODEL_PATH = "model.onnx"
 CLASS_NAMES = ["background", "stop", "person", "slow", "Uturn", "go"]
 CONF_THRESHOLD = 0.75
 
-# =========================
-# MODE STATE
-# =========================
 MODE = "MANUAL"
 AUTOPILOT_RUNNING = False
 E_STOP = False
@@ -56,29 +53,25 @@ I2C_BUS = 0
 THROTTLE_CHANNEL = 0
 STEERING_CHANNEL = 1
 
-THROTTLE_STOPPED_TICKS = 370
-THROTTLE_FORWARD_TICKS = 415
-THROTTLE_SLOW_TICKS = 399
-THROTTLE_REVERSE_TICKS = 305
+THROTTLE_STOPPED = 370
+THROTTLE_FORWARD = 415
+THROTTLE_SLOW = 405
+THROTTLE_REVERSE = 305
 
-STEERING_LEFT_TICKS   = 280
-STEERING_CENTER_TICKS = 380
-STEERING_RIGHT_TICKS  = 480
-
-STEERING_MIN_TICKS = 305
-STEERING_MAX_TICKS = 480
+STEERING_CENTER = 380
+STEERING_MIN = 305
+STEERING_MAX = 480
 
 CONTROL_HZ = 60.0
 CONTROL_DT = 1.0 / CONTROL_HZ
 
-# =========================
-# FLASK
-# =========================
+LINE_THRESHOLD = 100  # will be calibrated
+
 app = Flask(__name__)
 
 values = {
-    "throttle": THROTTLE_STOPPED_TICKS,
-    "steering": STEERING_CENTER_TICKS,
+    "throttle": THROTTLE_STOPPED,
+    "steering": STEERING_CENTER,
 }
 
 # =========================
@@ -111,161 +104,120 @@ class PCA9685:
         time.sleep(0.005)
         self.write8(self.MODE1, oldmode | self.RESTART)
 
-    def set_pwm(self, channel, on, off):
-        base = self.LED0_ON_L + 4 * channel
-        self.write8(base + 0, on & 0xFF)
-        self.write8(base + 1, (on >> 8) & 0xFF)
-        self.write8(base + 2, off & 0xFF)
-        self.write8(base + 3, (off >> 8) & 0xFF)
-
     def set_pwm_12bit(self, channel, value):
         value = max(0, min(4095, int(value)))
-        self.set_pwm(channel, 0, value)
+        base = 0x06 + 4 * channel
+        self.write8(base + 0, 0)
+        self.write8(base + 1, 0)
+        self.write8(base + 2, value & 0xFF)
+        self.write8(base + 3, (value >> 8) & 0xFF)
 
 pwm = None
 net = None
 
 # =========================
-# LINE FOLLOWING
+# CAMERA BUFFER
 # =========================
+_latest_lock = threading.Lock()
+_latest_frame = None
+_latest_jpeg = None
+_latest_seq = 0
+
+# =========================
+# LINE CALIBRATION
+# =========================
+def calibrate_line(frame):
+    global LINE_THRESHOLD
+    h, w, _ = frame.shape
+    roi = frame[int(h*0.6):h, :]
+    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    LINE_THRESHOLD = int(np.mean(gray) * 0.8)
+    print("Line threshold calibrated:", LINE_THRESHOLD)
+
 def line_follow(frame):
     h, w, _ = frame.shape
     roi = frame[int(h*0.6):h, :]
-
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (5,5), 0)
-    _, thresh = cv2.threshold(blur, 100, 255, cv2.THRESH_BINARY_INV)
-
+    _, thresh = cv2.threshold(gray, LINE_THRESHOLD, 255, cv2.THRESH_BINARY_INV)
     moments = cv2.moments(thresh)
 
     if moments["m00"] > 0:
         cx = int(moments["m10"] / moments["m00"])
         error = cx - (w // 2)
-
-        steer = STEERING_CENTER_TICKS - int(error * 0.3)
-        steer = max(STEERING_MIN_TICKS, min(STEERING_MAX_TICKS, steer))
-
+        steer = STEERING_CENTER - int(error * 0.3)
+        steer = max(STEERING_MIN, min(STEERING_MAX, steer))
         values["steering"] = steer
-        values["throttle"] = THROTTLE_SLOW_TICKS + 5
+        values["throttle"] = THROTTLE_SLOW + 5
     else:
-        values["throttle"] = THROTTLE_STOPPED_TICKS
+        values["throttle"] = THROTTLE_STOPPED
 
 # =========================
-# CAMERA BUFFER
-# =========================
-_latest_lock = threading.Lock()
-_latest_jpeg = None
-_latest_seq = 0
-
-def ffmpeg_jpeg_pipe():
-    cmd = [
-        "ffmpeg",
-        "-f", "video4linux2",
-        "-input_format", "yuyv422",
-        "-framerate", str(FPS),
-        "-video_size", f"{WIDTH}x{HEIGHT}",
-        "-i", DEVICE,
-        "-an",
-        "-c:v", "mjpeg",
-        "-q:v", "7",
-        "-f", "image2pipe",
-        "pipe:1",
-    ]
-    return subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                            stderr=subprocess.DEVNULL, bufsize=0)
-
-def iter_jpegs(stream):
-    buf = bytearray()
-    while True:
-        chunk = stream.read(4096)
-        if not chunk:
-            return
-        buf.extend(chunk)
-        while True:
-            soi = buf.find(b"\xff\xd8")
-            eoi = buf.find(b"\xff\xd9", soi + 2)
-            if soi != -1 and eoi != -1:
-                jpg = bytes(buf[soi:eoi+2])
-                del buf[:eoi+2]
-                yield jpg
-            else:
-                break
-
-# =========================
-# CAMERA + AI
+# CAMERA THREAD
 # =========================
 def camera_worker():
-    global _latest_jpeg, _latest_seq
-    frame_count = 0
-    last_label = ""
+    global _latest_frame, _latest_jpeg, _latest_seq
+    cap = cv2.VideoCapture(DEVICE)
 
     while True:
-        p = ffmpeg_jpeg_pipe()
-        for jpg in iter_jpegs(p.stdout):
+        ret, frame = cap.read()
+        if not ret:
+            continue
 
-            frame = cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_COLOR)
-            if frame is None:
-                continue
+        _latest_frame = frame.copy()
 
-            frame_count += 1
+        if MODE == "AUTOPILOT" and AUTOPILOT_RUNNING and not E_STOP:
 
-            if (net and MODE == "AUTOPILOT"
-                and AUTOPILOT_RUNNING and not E_STOP
-                and frame_count % 4 == 0):
+            img = cv2.resize(frame, (224,224))
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            img = img.astype(np.float32)/255.0
+            img = np.expand_dims(img, axis=0)
 
-                img = cv2.resize(frame, (224,224))
-                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                img = img.astype(np.float32)/255.0
-                img = np.expand_dims(img, axis=0)
-
+            if net:
                 net.setInput(img)
                 output = net.forward()[0]
-
                 class_id = int(np.argmax(output))
                 confidence = float(output[class_id])
                 label = CLASS_NAMES[class_id]
-                last_label = f"{label} ({confidence:.2f})"
 
                 if confidence > CONF_THRESHOLD:
-
                     if label in ["stop","person"]:
-                        values["throttle"] = THROTTLE_STOPPED_TICKS
-
+                        values["throttle"] = THROTTLE_STOPPED
                     elif label == "go":
-                        values["throttle"] = THROTTLE_FORWARD_TICKS
-
+                        values["throttle"] = THROTTLE_FORWARD
                     elif label == "slow":
-                        values["throttle"] = THROTTLE_SLOW_TICKS
-
-                    elif label == "Uturn":
-                        values["steering"] = STEERING_RIGHT_TICKS
-
+                        values["throttle"] = THROTTLE_SLOW
                     elif label == "background":
                         line_follow(frame)
+                    elif label == "Uturn":
+                        print("U-TURN detected")
 
-            cv2.putText(frame, f"Mode:{MODE}", (10,20),
-                        cv2.FONT_HERSHEY_SIMPLEX,0.6,(0,255,255),2)
-            cv2.putText(frame,
-                        f"T:{values['throttle']} S:{values['steering']}",
-                        (10,50),
-                        cv2.FONT_HERSHEY_SIMPLEX,0.6,(0,255,0),2)
+                        # Slow down first
+                        values["throttle"] = THROTTLE_Slow
+                        values["steering"] = STEERING_MAX
+                        time.sleep(0.5)   # adjust duration
+                        # forwards and turn left 
+                        values["throttle"] = THROTTLE_FORWARD
+                        values["steering"] = STEERING_MAX
+                        time.sleep(3)   # adjust duration
+                        # backwards and turn right 
+                        values["throttle"] = THROTTLE_BACKWARD + 5
+                        values["steering"] = STEERING_MIN
+                        time.sleep(3)   # adjust duration
+                        # Straighten out
+                        values["steering"] = STEERING_CENTER
+                        time.sleep(0.3)
 
-            if last_label:
-                cv2.putText(frame,last_label,(10,80),
-                            cv2.FONT_HERSHEY_SIMPLEX,0.6,(255,255,0),2)
-
-            _, enc = cv2.imencode(".jpg", frame)
-            with _latest_lock:
-                _latest_jpeg = enc.tobytes()
-                _latest_seq += 1
+        _, enc = cv2.imencode(".jpg", frame)
+        with _latest_lock:
+            _latest_jpeg = enc.tobytes()
+            _latest_seq += 1
 
 # =========================
-# MJPEG STREAM
+# WEB ROUTES
 # =========================
 @app.route("/mjpg")
 def mjpg():
-    def generate():
-        boundary = b"--frame\r\n"
+    def gen():
         last = -1
         while True:
             with _latest_lock:
@@ -275,57 +227,9 @@ def mjpg():
                 time.sleep(0.01)
                 continue
             last = seq
-            yield boundary + b"Content-Type: image/jpeg\r\n\r\n" + jpg + b"\r\n"
-    return Response(generate(),
+            yield b"--frame\r\nContent-Type:image/jpeg\r\n\r\n"+jpg+b"\r\n"
+    return Response(gen(),
         mimetype="multipart/x-mixed-replace; boundary=frame")
-
-# =========================
-# WEB UI
-# =========================
-@app.route("/")
-def index():
-    return render_template_string("""
-<!DOCTYPE html>
-<html>
-<head>
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-body{margin:0;background:black;color:white;font-family:Arial;text-align:center;}
-.container{display:flex;flex-direction:column;height:100vh;}
-.video{flex:1;}
-.video img{width:100%;height:100%;object-fit:contain;}
-.controls{background:#111;padding:10px;}
-button{padding:10px;margin:5px;font-size:16px;border:none;border-radius:6px;}
-.estop{background:red;color:white;font-weight:bold;}
-</style>
-</head>
-<body>
-<div class="container">
-<div class="video"><img src="/mjpg"></div>
-<div class="controls">
-<button onclick="fetch('/mode')">Toggle Mode</button>
-<button onclick="fetch('/autopilot/start')">Autopilot Start</button>
-<button onclick="fetch('/autopilot/pause')">Autopilot Pause</button>
-<button class="estop" onclick="fetch('/estop')">E-STOP</button><br>
-Throttle:<span id="t">--</span> |
-Steering:<span id="s">--</span> |
-Mode:<span id="m">--</span>
-</div>
-</div>
-<script>
-async function update(){
-let r=await fetch('/status');
-let d=await r.json();
-t.innerText=d.throttle;
-s.innerText=d.steering;
-m.innerText=d.mode;
-}
-setInterval(update,200);
-update();
-</script>
-</body>
-</html>
-""")
 
 @app.route("/status")
 def status():
@@ -344,21 +248,83 @@ def toggle_mode():
 @app.route("/autopilot/start")
 def auto_start():
     global AUTOPILOT_RUNNING
-    AUTOPILOT_RUNNING=True
-    return "OK"
+    AUTOPILOT_RUNNING = True
+    if _latest_frame is not None:
+        calibrate_line(_latest_frame)
+    return "STARTED"
 
 @app.route("/autopilot/pause")
 def auto_pause():
     global AUTOPILOT_RUNNING
-    AUTOPILOT_RUNNING=False
-    return "OK"
+    AUTOPILOT_RUNNING = False
+    return "PAUSED"
 
 @app.route("/estop")
 def estop():
     global E_STOP
-    E_STOP=True
-    values["throttle"]=THROTTLE_STOPPED_TICKS
+    E_STOP = True
+    values["throttle"] = THROTTLE_STOPPED
     return "STOPPED"
+
+@app.route("/joystick", methods=["POST"])
+def joystick():
+    data = request.json
+    x = float(data["x"])
+    y = float(data["y"])
+
+    steer = STEERING_CENTER + int(x * 80)
+    steer = max(STEERING_MIN, min(STEERING_MAX, steer))
+
+    throttle = THROTTLE_STOPPED - int(y * 60)
+
+    values["steering"] = steer
+    values["throttle"] = throttle
+
+    return "OK"
+
+# =========================
+# UI
+# =========================
+@app.route("/")
+def index():
+    return render_template_string("""
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body{margin:0;background:black;color:white;text-align:center;}
+.video{height:60vh;}
+.video img{width:100%;height:100%;object-fit:contain;}
+#joy{width:200px;height:200px;margin:auto;background:#222;border-radius:50%;position:relative;}
+#stick{width:80px;height:80px;background:#555;border-radius:50%;position:absolute;top:60px;left:60px;}
+button{padding:10px;margin:5px;}
+</style>
+</head>
+<body>
+<div class="video"><img src="/mjpg"></div>
+<button onclick="fetch('/mode')">Toggle Mode</button>
+<button onclick="fetch('/autopilot/start')">Autopilot Start</button>
+<button onclick="fetch('/autopilot/pause')">Pause</button>
+<button onclick="fetch('/estop')">E-STOP</button>
+<div id="joy"><div id="stick"></div></div>
+<script>
+let joy=document.getElementById("joy");
+let stick=document.getElementById("stick");
+
+joy.addEventListener("touchmove",e=>{
+let rect=joy.getBoundingClientRect();
+let x=e.touches[0].clientX-rect.left-100;
+let y=e.touches[0].clientY-rect.top-100;
+x/=100; y/=100;
+fetch("/joystick",{method:"POST",
+headers:{"Content-Type":"application/json"},
+body:JSON.stringify({x:x,y:y})});
+});
+</script>
+</body>
+</html>
+""")
 
 # =========================
 # CONTROL LOOP
@@ -374,19 +340,15 @@ def control_loop():
 # MAIN
 # =========================
 if __name__ == "__main__":
-    signal.signal(signal.SIGINT, lambda s,f: exit(0))
-
     try:
         net = cv2.dnn.readNetFromONNX(MODEL_PATH)
-        print("AI model loaded")
     except:
-        net=None
-        print("No model found")
+        net = None
 
     pwm = PCA9685(I2C_BUS, PCA9685_ADDR, PCA9685_FREQ)
 
     threading.Thread(target=camera_worker, daemon=True).start()
     threading.Thread(target=control_loop, daemon=True).start()
 
-    print(f"Open http://<board-ip>:{PORT}/")
-    app.run(host="0.0.0.0", port=PORT, threaded=True)
+    print("Open http://<board-ip>:6088/")
+    app.run(host="0.0.0.0", port=PORT)
