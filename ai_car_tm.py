@@ -4,6 +4,11 @@
 AI Autonomous RC Car
 Full System:
 - Manual control
+- autopilot AI
+- mode switch
+- start/pause btn
+- E-stop
+- live pwm display
 - Lab color line following
 - Road sign decision supervisor
 - STOP / GO memory
@@ -12,14 +17,14 @@ Full System:
 - U-TURN timed maneuver
 """
 
-from flask import Flask, Response
+from flask import Flask, Response, render_template_string, request, jsonify
 import subprocess
+import socket
 import time
 import threading
 import signal
 import cv2
 import numpy as np
-from smbus2 import SMBus
 
 # =========================
 # CONFIG
@@ -27,22 +32,29 @@ from smbus2 import SMBus
 DEVICE = "/dev/video4"
 WIDTH = 320
 HEIGHT = 240
-FPS = 6
-PORT = 6088   # ✅ UPDATED PORT
+FPS = 10
+PORT = 6088
 
 # =========================
-# AI MODEL CONFIG
+# AI CONFIG
 # =========================
 MODEL_PATH = "model.onnx"
 AI_ENABLED = True
-
+CONF_THRESHOLD = 0.75
 CLASS_NAMES = ["background", "stop", "person", "slow", "Uturn", "go"]
 
-net = None
+# =========================
+# MODE STATE
+# =========================
+MODE = "MANUAL"     # MANUAL or AUTOPILOT
+AUTOPILOT_RUNNING = False
+E_STOP = False
 
 # =========================
 # PCA9685 CONFIG
 # =========================
+from smbus2 import SMBus
+
 PCA9685_ADDR = 0x40
 PCA9685_FREQ = 60
 I2C_BUS = 0
@@ -53,47 +65,49 @@ STEERING_CHANNEL = 1
 THROTTLE_STOPPED_TICKS = 370
 THROTTLE_FORWARD_TICKS = 415
 THROTTLE_SLOW_TICKS = 390
-THROTTLE_REVERSE_TICKS = 310
+THROTTLE_REVERSE_TICKS = 305
 
-STEERING_LEFT_TICKS = 280
+STEERING_LEFT_TICKS   = 280
 STEERING_CENTER_TICKS = 380
-STEERING_RIGHT_TICKS = 480
+STEERING_RIGHT_TICKS  = 480
 
 STEERING_MIN_TICKS = 305
 STEERING_MAX_TICKS = 480
 
-CONTROL_HZ = 30.0
+STEP = 5
+STEERING_STEP = 25
+
+CONTROL_HZ = 60.0
 CONTROL_DT = 1.0 / CONTROL_HZ
 FAILSAFE_TIMEOUT_SEC = 0.35
 
-CONF_THRESHOLD = 0.75
-
 # =========================
-# Flask
+# FLASK
 # =========================
 app = Flask(__name__)
 
 # =========================
-# CONTROL STATE
+# GLOBAL STATE
 # =========================
 state_lock = threading.Lock()
+
 control_state = {
-    "throttle": THROTTLE_STOPPED_TICKS,
-    "steering": STEERING_CENTER_TICKS,
+    "up": False,
+    "down": False,
+    "left": False,
+    "right": False,
+    "center": False,
     "brake": False,
     "last_seen": 0.0,
 }
 
-# =========================
-# CAMERA BUFFER
-# =========================
-_latest_lock = threading.Lock()
-_latest_jpeg = None
-_latest_seq = 0
-_camera_stop = threading.Event()
+values = {
+    "throttle": THROTTLE_STOPPED_TICKS,
+    "steering": STEERING_CENTER_TICKS,
+}
 
 # =========================
-# PCA9685 DRIVER
+# PWM DRIVER
 # =========================
 class PCA9685:
     MODE1 = 0x00
@@ -136,7 +150,20 @@ class PCA9685:
 pwm = None
 
 # =========================
-# CAMERA PIPE (UNCHANGED)
+# AI MODEL
+# =========================
+net = None
+
+# =========================
+# CAMERA BUFFER
+# =========================
+_latest_lock = threading.Lock()
+_latest_jpeg = None
+_latest_seq = 0
+_camera_stop = threading.Event()
+
+# =========================
+# CAMERA PIPE
 # =========================
 def ffmpeg_jpeg_pipe():
     cmd = [
@@ -173,32 +200,28 @@ def iter_jpegs(stream):
                 break
 
 # =========================
-# CAMERA WORKER + AI
+# CAMERA + AI WORKER
 # =========================
 def camera_worker():
     global _latest_jpeg, _latest_seq
-
     frame_count = 0
     last_label = ""
 
     while not _camera_stop.is_set():
-
         p = ffmpeg_jpeg_pipe()
 
         for jpg in iter_jpegs(p.stdout):
 
-            frame = cv2.imdecode(
-                np.frombuffer(jpg, np.uint8),
-                cv2.IMREAD_COLOR
-            )
-
+            frame = cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_COLOR)
             if frame is None:
                 continue
 
             frame_count += 1
 
-            # ✅ REQUIRED CONDITION
-            if AI_ENABLED and net is not None and frame_count % 4 == 0:
+            # AUTOPILOT AI
+            if (AI_ENABLED and net is not None and
+                MODE == "AUTOPILOT" and AUTOPILOT_RUNNING and
+                frame_count % 4 == 0 and not E_STOP):
 
                 img = cv2.resize(frame, (224, 224))
                 img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
@@ -211,38 +234,46 @@ def camera_worker():
                 class_id = int(np.argmax(output))
                 confidence = float(output[class_id])
                 label = CLASS_NAMES[class_id]
-
                 last_label = f"{label} ({confidence:.2f})"
 
                 if confidence > CONF_THRESHOLD:
 
-                    with state_lock:
+                    if label in ["stop", "person"]:
+                        values["throttle"] = THROTTLE_STOPPED_TICKS
 
-                        control_state["last_seen"] = time.perf_counter()
+                    elif label == "go":
+                        values["throttle"] = THROTTLE_FORWARD_TICKS
 
-                        if label in ["stop", "person"]:
-                            control_state["brake"] = True
+                    elif label == "slow":
+                        values["throttle"] = THROTTLE_SLOW_TICKS
 
-                        elif label == "go":
-                            control_state["brake"] = False
-                            control_state["throttle"] = THROTTLE_FORWARD_TICKS
+                    elif label == "Uturn":
+                        values["steering"] = STEERING_RIGHT_TICKS
 
-                        elif label == "slow":
-                            control_state["brake"] = False
-                            control_state["throttle"] = THROTTLE_SLOW_TICKS
+            # ===== OVERLAY INFO =====
+            cv2.putText(frame, f"Mode: {MODE}",
+                        (10, 20), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.6, (0,255,255), 2)
 
-                        elif label == "Uturn":
-                            control_state["brake"] = False
-                            control_state["steering"] = STEERING_RIGHT_TICKS
+            cv2.putText(frame,
+                        f"Throttle: {values['throttle']}",
+                        (10, 50),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.6, (0,255,0), 2)
 
-            # Draw label
+            cv2.putText(frame,
+                        f"Steering: {values['steering']}",
+                        (10, 80),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.6, (0,255,0), 2)
+
             if last_label:
-                cv2.putText(frame, last_label, (10, 30),
+                cv2.putText(frame, last_label,
+                            (10, 110),
                             cv2.FONT_HERSHEY_SIMPLEX,
-                            0.7, (0, 255, 0), 2)
+                            0.7, (255,255,0), 2)
 
-            _, enc = cv2.imencode(".jpg", frame,
-                                  [cv2.IMWRITE_JPEG_QUALITY, 60])
+            _, enc = cv2.imencode(".jpg", frame)
             jpg = enc.tobytes()
 
             with _latest_lock:
@@ -261,11 +292,9 @@ def mjpg():
             with _latest_lock:
                 seq = _latest_seq
                 jpg = _latest_jpeg
-
             if jpg is None or seq == last_seq:
                 time.sleep(0.01)
                 continue
-
             last_seq = seq
             yield (boundary +
                    b"Content-Type: image/jpeg\r\n\r\n" +
@@ -274,30 +303,63 @@ def mjpg():
     return Response(generate(),
         mimetype="multipart/x-mixed-replace; boundary=frame")
 
+# =========================
+# WEB UI
+# =========================
 @app.route("/")
 def index():
-    return "<h1>AI Drive</h1><img src='/mjpg'>"
+    return render_template_string("""
+    <html>
+    <body style="background:black;color:white;text-align:center;">
+    <h2>AI CAR CONTROL</h2>
+    <img src="/mjpg" width="90%"><br><br>
+
+    <button onclick="fetch('/mode')">Toggle Mode</button>
+    <button onclick="fetch('/autopilot/start')">Autopilot Start</button>
+    <button onclick="fetch('/autopilot/pause')">Autopilot Pause</button>
+    <button style="background:red;color:white;"
+            onclick="fetch('/estop')">E-STOP</button>
+
+    </body>
+    </html>
+    """)
+
+# =========================
+# MODE ROUTES
+# =========================
+@app.route("/mode")
+def toggle_mode():
+    global MODE
+    MODE = "AUTOPILOT" if MODE == "MANUAL" else "MANUAL"
+    return "OK"
+
+@app.route("/autopilot/start")
+def auto_start():
+    global AUTOPILOT_RUNNING
+    AUTOPILOT_RUNNING = True
+    return "OK"
+
+@app.route("/autopilot/pause")
+def auto_pause():
+    global AUTOPILOT_RUNNING
+    AUTOPILOT_RUNNING = False
+    return "OK"
+
+@app.route("/estop")
+def estop():
+    global E_STOP
+    E_STOP = True
+    values["throttle"] = THROTTLE_STOPPED_TICKS
+    return "STOPPED"
 
 # =========================
 # CONTROL LOOP
 # =========================
 def control_loop():
     while True:
-
-        with state_lock:
-            s = dict(control_state)
-
-        # failsafe
-        if (time.perf_counter() - s["last_seen"]) > FAILSAFE_TIMEOUT_SEC:
-            s["brake"] = True
-
-        if s["brake"]:
-            pwm.set_pwm_12bit(THROTTLE_CHANNEL, THROTTLE_STOPPED_TICKS)
-        else:
-            pwm.set_pwm_12bit(THROTTLE_CHANNEL, s["throttle"])
-
-        pwm.set_pwm_12bit(STEERING_CHANNEL, s["steering"])
-
+        if pwm is not None:
+            pwm.set_pwm_12bit(THROTTLE_CHANNEL, values["throttle"])
+            pwm.set_pwm_12bit(STEERING_CHANNEL, values["steering"])
         time.sleep(CONTROL_DT)
 
 # =========================
@@ -305,17 +367,16 @@ def control_loop():
 # =========================
 if __name__ == "__main__":
 
-    signal.signal(signal.SIGINT, lambda s, f: exit(0))
+    signal.signal(signal.SIGINT, lambda s,f: exit(0))
 
-    print("✅ Loading ONNX model...")
+    print("Loading AI model...")
     net = cv2.dnn.readNetFromONNX(MODEL_PATH)
-    print("✅ Model loaded")
+    print("Model loaded")
 
     pwm = PCA9685(I2C_BUS, PCA9685_ADDR, PCA9685_FREQ)
 
     threading.Thread(target=camera_worker, daemon=True).start()
     threading.Thread(target=control_loop, daemon=True).start()
 
-    print(f"✅ Open on phone: http://<board-ip>:{PORT}/")
-
+    print(f"Open: http://<board-ip>:{PORT}/")
     app.run(host="0.0.0.0", port=PORT, threaded=True)
