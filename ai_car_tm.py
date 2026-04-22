@@ -132,7 +132,7 @@ def line_follow(frame):
         error = cx - (frame.shape[1] // 2)
         steer = STEERING_CENTER - int(error * 0.3)
         values["steering"] = max(STEERING_MIN, min(STEERING_MAX, steer))
-        values["throttle"] = THROTTLE_SLOW + 5
+        values["throttle"] = THROTTLE_SLOW + 8
     else:
         values["throttle"] = THROTTLE_STOPPED
 
@@ -194,7 +194,7 @@ def camera_worker():
                             values["steering"] = STEERING_MAX
                             time.sleep(3)
 
-                            values["throttle"] = THROTTLE_REVERSE + 5
+                            values["throttle"] = THROTTLE_REVERSE - 5
                             values["steering"] = STEERING_MIN
                             time.sleep(3)
 
