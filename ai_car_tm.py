@@ -17,6 +17,7 @@ Full System:
 - U-TURN timed maneuver
 """
 
+#!/usr/bin/env python3
 from flask import Flask, Response, render_template_string, request, jsonify
 import subprocess
 import socket
@@ -25,6 +26,7 @@ import threading
 import signal
 import cv2
 import numpy as np
+from smbus2 import SMBus
 
 # =========================
 # CONFIG
@@ -35,26 +37,20 @@ HEIGHT = 240
 FPS = 10
 PORT = 6088
 
-# =========================
-# AI CONFIG
-# =========================
 MODEL_PATH = "model.onnx"
-AI_ENABLED = True
-CONF_THRESHOLD = 0.75
 CLASS_NAMES = ["background", "stop", "person", "slow", "Uturn", "go"]
+CONF_THRESHOLD = 0.75
 
 # =========================
 # MODE STATE
 # =========================
-MODE = "MANUAL"     # MANUAL or AUTOPILOT
+MODE = "MANUAL"
 AUTOPILOT_RUNNING = False
 E_STOP = False
 
 # =========================
-# PCA9685 CONFIG
+# PWM CONFIG
 # =========================
-from smbus2 import SMBus
-
 PCA9685_ADDR = 0x40
 PCA9685_FREQ = 60
 I2C_BUS = 0
@@ -107,7 +103,7 @@ values = {
 }
 
 # =========================
-# PWM DRIVER
+# PCA9685 DRIVER
 # =========================
 class PCA9685:
     MODE1 = 0x00
@@ -148,10 +144,6 @@ class PCA9685:
         self.set_pwm(channel, 0, value)
 
 pwm = None
-
-# =========================
-# AI MODEL
-# =========================
 net = None
 
 # =========================
@@ -200,7 +192,7 @@ def iter_jpegs(stream):
                 break
 
 # =========================
-# CAMERA + AI WORKER
+# CAMERA + AI
 # =========================
 def camera_worker():
     global _latest_jpeg, _latest_seq
@@ -211,17 +203,15 @@ def camera_worker():
         p = ffmpeg_jpeg_pipe()
 
         for jpg in iter_jpegs(p.stdout):
-
             frame = cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_COLOR)
             if frame is None:
                 continue
 
             frame_count += 1
 
-            # AUTOPILOT AI
-            if (AI_ENABLED and net is not None and
-                MODE == "AUTOPILOT" and AUTOPILOT_RUNNING and
-                frame_count % 4 == 0 and not E_STOP):
+            if (net is not None and MODE == "AUTOPILOT"
+                and AUTOPILOT_RUNNING and not E_STOP
+                and frame_count % 4 == 0):
 
                 img = cv2.resize(frame, (224, 224))
                 img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
@@ -250,38 +240,25 @@ def camera_worker():
                     elif label == "Uturn":
                         values["steering"] = STEERING_RIGHT_TICKS
 
-            # ===== OVERLAY INFO =====
-            cv2.putText(frame, f"Mode: {MODE}",
-                        (10, 20), cv2.FONT_HERSHEY_SIMPLEX,
-                        0.6, (0,255,255), 2)
+            cv2.putText(frame, f"Mode: {MODE}", (10,20),
+                        cv2.FONT_HERSHEY_SIMPLEX,0.6,(0,255,255),2)
 
             cv2.putText(frame,
-                        f"Throttle: {values['throttle']}",
-                        (10, 50),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.6, (0,255,0), 2)
-
-            cv2.putText(frame,
-                        f"Steering: {values['steering']}",
-                        (10, 80),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.6, (0,255,0), 2)
+                        f"T:{values['throttle']}  S:{values['steering']}",
+                        (10,50),
+                        cv2.FONT_HERSHEY_SIMPLEX,0.6,(0,255,0),2)
 
             if last_label:
-                cv2.putText(frame, last_label,
-                            (10, 110),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            0.7, (255,255,0), 2)
+                cv2.putText(frame,last_label,(10,80),
+                            cv2.FONT_HERSHEY_SIMPLEX,0.6,(255,255,0),2)
 
             _, enc = cv2.imencode(".jpg", frame)
-            jpg = enc.tobytes()
-
             with _latest_lock:
-                _latest_jpeg = jpg
+                _latest_jpeg = enc.tobytes()
                 _latest_seq += 1
 
 # =========================
-# MJPEG ROUTE
+# MJPEG
 # =========================
 @app.route("/mjpg")
 def mjpg():
@@ -296,9 +273,7 @@ def mjpg():
                 time.sleep(0.01)
                 continue
             last_seq = seq
-            yield (boundary +
-                   b"Content-Type: image/jpeg\r\n\r\n" +
-                   jpg + b"\r\n")
+            yield boundary + b"Content-Type: image/jpeg\r\n\r\n" + jpg + b"\r\n"
 
     return Response(generate(),
         mimetype="multipart/x-mixed-replace; boundary=frame")
@@ -309,47 +284,82 @@ def mjpg():
 @app.route("/")
 def index():
     return render_template_string("""
-    <html>
-    <body style="background:black;color:white;text-align:center;">
-    <h2>AI CAR CONTROL</h2>
-    <img src="/mjpg" width="90%"><br><br>
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body{margin:0;background:black;color:white;font-family:Arial;text-align:center;}
+.container{display:flex;flex-direction:column;height:100vh;}
+.video{flex:1;}
+.video img{width:100%;height:100%;object-fit:contain;}
+.controls{background:#111;padding:10px;}
+button{padding:10px;margin:5px;font-size:16px;border:none;border-radius:6px;}
+.estop{background:red;color:white;font-weight:bold;}
+</style>
+</head>
+<body>
+<div class="container">
+<div class="video">
+<img src="/mjpg">
+</div>
+<div class="controls">
+<button onclick="fetch('/mode')">Toggle Mode</button>
+<button onclick="fetch('/autopilot/start')">Autopilot Start</button>
+<button onclick="fetch('/autopilot/pause')">Autopilot Pause</button>
+<button class="estop" onclick="fetch('/estop')">E-STOP</button>
+<br>
+Throttle: <span id="t">--</span> |
+Steering: <span id="s">--</span> |
+Mode: <span id="m">--</span>
+</div>
+</div>
+<script>
+async function update(){
+let r=await fetch('/status');
+let d=await r.json();
+t.innerText=d.throttle;
+s.innerText=d.steering;
+m.innerText=d.mode;
+}
+setInterval(update,200);
+update();
+</script>
+</body>
+</html>
+""")
 
-    <button onclick="fetch('/mode')">Toggle Mode</button>
-    <button onclick="fetch('/autopilot/start')">Autopilot Start</button>
-    <button onclick="fetch('/autopilot/pause')">Autopilot Pause</button>
-    <button style="background:red;color:white;"
-            onclick="fetch('/estop')">E-STOP</button>
+@app.route("/status")
+def status():
+    return jsonify({
+        "throttle": values["throttle"],
+        "steering": values["steering"],
+        "mode": MODE
+    })
 
-    </body>
-    </html>
-    """)
-
-# =========================
-# MODE ROUTES
-# =========================
 @app.route("/mode")
 def toggle_mode():
     global MODE
-    MODE = "AUTOPILOT" if MODE == "MANUAL" else "MANUAL"
+    MODE = "AUTOPILOT" if MODE=="MANUAL" else "MANUAL"
     return "OK"
 
 @app.route("/autopilot/start")
 def auto_start():
     global AUTOPILOT_RUNNING
-    AUTOPILOT_RUNNING = True
+    AUTOPILOT_RUNNING=True
     return "OK"
 
 @app.route("/autopilot/pause")
 def auto_pause():
     global AUTOPILOT_RUNNING
-    AUTOPILOT_RUNNING = False
+    AUTOPILOT_RUNNING=False
     return "OK"
 
 @app.route("/estop")
 def estop():
     global E_STOP
-    E_STOP = True
-    values["throttle"] = THROTTLE_STOPPED_TICKS
+    E_STOP=True
+    values["throttle"]=THROTTLE_STOPPED_TICKS
     return "STOPPED"
 
 # =========================
@@ -357,7 +367,7 @@ def estop():
 # =========================
 def control_loop():
     while True:
-        if pwm is not None:
+        if pwm:
             pwm.set_pwm_12bit(THROTTLE_CHANNEL, values["throttle"])
             pwm.set_pwm_12bit(STEERING_CHANNEL, values["steering"])
         time.sleep(CONTROL_DT)
@@ -366,17 +376,20 @@ def control_loop():
 # MAIN
 # =========================
 if __name__ == "__main__":
-
     signal.signal(signal.SIGINT, lambda s,f: exit(0))
 
-    print("Loading AI model...")
-    net = cv2.dnn.readNetFromONNX(MODEL_PATH)
-    print("Model loaded")
+    print("Loading model...")
+    try:
+        net = cv2.dnn.readNetFromONNX(MODEL_PATH)
+        print("Model loaded.")
+    except:
+        print("No model found. Autopilot disabled.")
+        net=None
 
     pwm = PCA9685(I2C_BUS, PCA9685_ADDR, PCA9685_FREQ)
 
     threading.Thread(target=camera_worker, daemon=True).start()
     threading.Thread(target=control_loop, daemon=True).start()
 
-    print(f"Open: http://<board-ip>:{PORT}/")
+    print(f"Open http://<board-ip>:{PORT}/")
     app.run(host="0.0.0.0", port=PORT, threaded=True)
