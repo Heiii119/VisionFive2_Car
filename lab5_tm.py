@@ -59,7 +59,11 @@ while True:
     img = img.astype(np.float32) / 255.0
 
     # Change HWC -> CHW
-    img = np.transpose(img, (2, 0, 1))
+    img = cv2.resize(frame, (224, 224))
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    img = img.astype(np.float32) / 255.0
+
+    # Keep NHWC format
     img = np.expand_dims(img, axis=0)
 
     # Run inference
