@@ -25,7 +25,7 @@ PORT = 6077
 MODEL_PATH = "model.onnx"
 AI_ENABLED = True
 
-CLASS_NAMES = ["background", "stop", "person", "turn", "slow", "go"]
+CLASS_NAMES = ["background", "stop", "person", "slow", "Uturn", "go"]
 INPUT_WIDTH = 224
 INPUT_HEIGHT = 224
 
