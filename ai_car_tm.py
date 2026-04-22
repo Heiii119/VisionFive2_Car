@@ -18,10 +18,8 @@ Full System:
 """
 
 from flask import Flask, Response, render_template_string, jsonify, request
-import subprocess
 import time
 import threading
-import signal
 import cv2
 import numpy as np
 from smbus2 import SMBus
@@ -30,9 +28,6 @@ from smbus2 import SMBus
 # CONFIG
 # =========================
 DEVICE = "/dev/video4"
-WIDTH = 320
-HEIGHT = 240
-FPS = 10
 PORT = 6088
 
 MODEL_PATH = "model.onnx"
@@ -63,10 +58,8 @@ STEERING_CENTER = 380
 STEERING_MIN = 305
 STEERING_MAX = 480
 
-CONTROL_HZ = 60.0
-CONTROL_DT = 1.0 / CONTROL_HZ
-
-LINE_THRESHOLD = 100  # will be calibrated
+CONTROL_DT = 1.0 / 60.0
+LINE_THRESHOLD = 100
 
 app = Flask(__name__)
 
@@ -76,12 +69,11 @@ values = {
 }
 
 # =========================
-# PCA9685 DRIVER
+# PCA9685
 # =========================
 class PCA9685:
     MODE1 = 0x00
     PRESCALE = 0xFE
-    LED0_ON_L = 0x06
     RESTART = 0x80
     SLEEP = 0x10
 
@@ -114,38 +106,32 @@ class PCA9685:
 pwm = None
 net = None
 
-# =========================
-# CAMERA BUFFER
-# =========================
 _latest_lock = threading.Lock()
 _latest_frame = None
 _latest_jpeg = None
 _latest_seq = 0
+frame_counter = 0  # ✅ AI every 4th frame
 
 # =========================
-# LINE CALIBRATION
+# LINE FOLLOW (UNCHANGED)
 # =========================
 def calibrate_line(frame):
     global LINE_THRESHOLD
-    h, w, _ = frame.shape
-    roi = frame[int(h*0.6):h, :]
+    roi = frame[int(frame.shape[0]*0.6):, :]
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
     LINE_THRESHOLD = int(np.mean(gray) * 0.8)
-    print("Line threshold calibrated:", LINE_THRESHOLD)
 
 def line_follow(frame):
-    h, w, _ = frame.shape
-    roi = frame[int(h*0.6):h, :]
+    roi = frame[int(frame.shape[0]*0.6):, :]
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
     _, thresh = cv2.threshold(gray, LINE_THRESHOLD, 255, cv2.THRESH_BINARY_INV)
     moments = cv2.moments(thresh)
 
     if moments["m00"] > 0:
         cx = int(moments["m10"] / moments["m00"])
-        error = cx - (w // 2)
+        error = cx - (frame.shape[1] // 2)
         steer = STEERING_CENTER - int(error * 0.3)
-        steer = max(STEERING_MIN, min(STEERING_MAX, steer))
-        values["steering"] = steer
+        values["steering"] = max(STEERING_MIN, min(STEERING_MAX, steer))
         values["throttle"] = THROTTLE_SLOW + 5
     else:
         values["throttle"] = THROTTLE_STOPPED
@@ -154,7 +140,8 @@ def line_follow(frame):
 # CAMERA THREAD
 # =========================
 def camera_worker():
-    global _latest_frame, _latest_jpeg, _latest_seq, CURRENT_LABEL
+    global _latest_frame, _latest_jpeg, _latest_seq, CURRENT_LABEL, frame_counter
+
     cap = cv2.VideoCapture(DEVICE)
 
     while True:
@@ -163,53 +150,56 @@ def camera_worker():
             continue
 
         _latest_frame = frame.copy()
+        frame_counter += 1
 
-        if MODE == "AUTOPILOT" and AUTOPILOT_RUNNING and not E_STOP:
+        # ✅ RUN AI ONLY EVERY 4TH FRAME
+        if frame_counter % 4 == 0:
+            if MODE == "AUTOPILOT" and AUTOPILOT_RUNNING and not E_STOP:
 
-            img = cv2.resize(frame, (224,224))
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            img = img.astype(np.float32)/255.0
-            img = np.expand_dims(img, axis=0)
+                img = cv2.resize(frame, (224,224))
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                img = img.astype(np.float32)/255.0
+                img = np.expand_dims(img, axis=0)
 
-            if net:
-                net.setInput(img)
-                output = net.forward()[0]
-                class_id = int(np.argmax(output))
-                confidence = float(output[class_id])
-                label = CLASS_NAMES[class_id]
-                CURRENT_LABEL = label
+                if net:
+                    net.setInput(img)
+                    output = net.forward()[0]
+                    class_id = int(np.argmax(output))
+                    confidence = float(output[class_id])
+                    label = CLASS_NAMES[class_id]
+                    CURRENT_LABEL = label
 
-                if confidence > CONF_THRESHOLD:
+                    if confidence > CONF_THRESHOLD:
 
-                    if label in ["stop","person"]:
-                        values["throttle"] = THROTTLE_STOPPED
+                        if label in ["stop","person"]:
+                            values["throttle"] = THROTTLE_STOPPED
 
-                    elif label == "go":
-                        values["throttle"] = THROTTLE_FORWARD
+                        elif label == "go":
+                            values["throttle"] = THROTTLE_FORWARD
 
-                    elif label == "slow":
-                        values["throttle"] = THROTTLE_SLOW
+                        elif label == "slow":
+                            values["throttle"] = THROTTLE_SLOW
 
-                    elif label == "background":
-                        line_follow(frame)
+                        elif label == "background":
+                            line_follow(frame)
 
-                    elif label == "Uturn":
-                        print("U-TURN detected")
+                        elif label == "Uturn":
+                            print("U-TURN detected")
 
-                        values["throttle"] = THROTTLE_SLOW
-                        values["steering"] = STEERING_MAX
-                        time.sleep(0.5)
+                            values["throttle"] = THROTTLE_SLOW
+                            values["steering"] = STEERING_MAX
+                            time.sleep(0.5)
 
-                        values["throttle"] = THROTTLE_FORWARD
-                        values["steering"] = STEERING_MAX
-                        time.sleep(3)
+                            values["throttle"] = THROTTLE_FORWARD
+                            values["steering"] = STEERING_MAX
+                            time.sleep(3)
 
-                        values["throttle"] = THROTTLE_REVERSE - 5
-                        values["steering"] = STEERING_MIN
-                        time.sleep(3)
+                            values["throttle"] = THROTTLE_REVERSE + 5
+                            values["steering"] = STEERING_MIN
+                            time.sleep(3)
 
-                        values["steering"] = STEERING_CENTER
-                        time.sleep(0.3)
+                            values["steering"] = STEERING_CENTER
+                            time.sleep(0.3)
 
         _, enc = cv2.imencode(".jpg", frame)
         with _latest_lock:
@@ -228,17 +218,22 @@ def status():
         "label": CURRENT_LABEL
     })
 
-@app.route("/joystick/throttle", methods=["POST"])
-def joystick_throttle():
-    y = float(request.json["y"])
-    values["throttle"] = THROTTLE_STOPPED - int(y * 60)
-    return "OK"
+@app.route("/arrow", methods=["POST"])
+def arrow():
+    direction = request.json["dir"]
 
-@app.route("/joystick/steering", methods=["POST"])
-def joystick_steering():
-    x = float(request.json["x"])
-    steer = STEERING_CENTER + int(x * 80)
-    values["steering"] = max(STEERING_MIN, min(STEERING_MAX, steer))
+    if direction == "up":
+        values["throttle"] = THROTTLE_FORWARD
+    elif direction == "down":
+        values["throttle"] = THROTTLE_REVERSE
+    elif direction == "left":
+        values["steering"] = STEERING_MIN
+    elif direction == "right":
+        values["steering"] = STEERING_MAX
+    elif direction == "stop":
+        values["throttle"] = THROTTLE_STOPPED
+        values["steering"] = STEERING_CENTER
+
     return "OK"
 
 @app.route("/mode")
@@ -283,7 +278,7 @@ def mjpg():
     return Response(gen(), mimetype="multipart/x-mixed-replace; boundary=frame")
 
 # =========================
-# UI
+# UI (ARROW CONTROLLER)
 # =========================
 @app.route("/")
 def index():
@@ -291,35 +286,42 @@ def index():
 <!DOCTYPE html>
 <html>
 <head>
-<meta name="viewport"
-content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <style>
 html,body{
 margin:0;padding:0;overflow:hidden;
 background:black;color:white;
-font-family:Arial;touch-action:none;}
+font-family:Arial;
+touch-action:none;
+user-select:none;
+-webkit-user-select:none;
+}
 .video{height:50vh;}
 .video img{width:100%;height:100%;object-fit:contain;}
-.controls{display:flex;justify-content:space-around;margin-top:10px;}
-.joy{width:160px;height:160px;background:#222;border-radius:50%;}
+.buttons{text-align:center;margin-top:10px;}
+.arrow{width:80px;height:80px;font-size:30px;margin:5px;}
 .status{margin-top:10px;font-size:14px;}
-button{padding:6px;margin:3px;}
 </style>
 </head>
 <body>
 
-<div class="video"><img src="/mjpg"></div>
+<div class="video">
+<img src="/mjpg">
+</div>
 
-<div>
+<div class="buttons">
+<button onclick="send('up')" class="arrow">↑</button><br>
+<button onclick="send('left')" class="arrow">←</button>
+<button onclick="send('stop')" class="arrow">■</button>
+<button onclick="send('right')" class="arrow">→</button><br>
+<button onclick="send('down')" class="arrow">↓</button>
+</div>
+
+<div class="buttons">
 <button onclick="fetch('/mode')">Toggle Mode</button>
 <button onclick="fetch('/autopilot/start')">Autopilot Start</button>
 <button onclick="fetch('/autopilot/pause')">Pause</button>
 <button onclick="fetch('/estop')">E-STOP</button>
-</div>
-
-<div class="controls">
-<div><div>Steering</div><div id="steerJoy" class="joy"></div></div>
-<div><div>Throttle</div><div id="throttleJoy" class="joy"></div></div>
 </div>
 
 <div class="status">
@@ -331,6 +333,15 @@ Steering PWM: <span id="steering">-</span>
 
 <script>
 document.addEventListener("touchmove",e=>e.preventDefault(),{passive:false});
+document.addEventListener("selectstart",e=>e.preventDefault());
+
+function send(dir){
+fetch('/arrow',{
+method:'POST',
+headers:{'Content-Type':'application/json'},
+body:JSON.stringify({dir:dir})
+});
+}
 
 function poll(){
 fetch('/status').then(r=>r.json()).then(data=>{
@@ -341,22 +352,6 @@ document.getElementById("steering").innerText=data.steering;
 });
 }
 setInterval(poll,200);
-
-function setupJoy(id,url,axis){
-let joy=document.getElementById(id);
-joy.addEventListener("touchmove",e=>{
-let rect=joy.getBoundingClientRect();
-let x=(e.touches[0].clientX-rect.left-80)/80;
-let y=(e.touches[0].clientY-rect.top-80)/80;
-fetch(url,{
-method:"POST",
-headers:{"Content-Type":"application/json"},
-body:JSON.stringify(axis==="x"?{x:x}:{y:y})
-});
-},{passive:false});
-}
-setupJoy("steerJoy","/joystick/steering","x");
-setupJoy("throttleJoy","/joystick/throttle","y");
 </script>
 
 </body>
