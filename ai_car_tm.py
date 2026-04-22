@@ -17,10 +17,8 @@ Full System:
 - U-TURN timed maneuver
 """
 
-#!/usr/bin/env python3
-from flask import Flask, Response, render_template_string, request, jsonify
+from flask import Flask, Response, render_template_string, jsonify
 import subprocess
-import socket
 import time
 import threading
 import signal
@@ -70,32 +68,13 @@ STEERING_RIGHT_TICKS  = 480
 STEERING_MIN_TICKS = 305
 STEERING_MAX_TICKS = 480
 
-STEP = 5
-STEERING_STEP = 25
-
 CONTROL_HZ = 60.0
 CONTROL_DT = 1.0 / CONTROL_HZ
-FAILSAFE_TIMEOUT_SEC = 0.35
 
 # =========================
 # FLASK
 # =========================
 app = Flask(__name__)
-
-# =========================
-# GLOBAL STATE
-# =========================
-state_lock = threading.Lock()
-
-control_state = {
-    "up": False,
-    "down": False,
-    "left": False,
-    "right": False,
-    "center": False,
-    "brake": False,
-    "last_seen": 0.0,
-}
 
 values = {
     "throttle": THROTTLE_STOPPED_TICKS,
@@ -147,16 +126,37 @@ pwm = None
 net = None
 
 # =========================
+# LINE FOLLOWING
+# =========================
+def line_follow(frame):
+    h, w, _ = frame.shape
+    roi = frame[int(h*0.6):h, :]
+
+    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    blur = cv2.GaussianBlur(gray, (5,5), 0)
+    _, thresh = cv2.threshold(blur, 100, 255, cv2.THRESH_BINARY_INV)
+
+    moments = cv2.moments(thresh)
+
+    if moments["m00"] > 0:
+        cx = int(moments["m10"] / moments["m00"])
+        error = cx - (w // 2)
+
+        steer = STEERING_CENTER_TICKS - int(error * 0.3)
+        steer = max(STEERING_MIN_TICKS, min(STEERING_MAX_TICKS, steer))
+
+        values["steering"] = steer
+        values["throttle"] = THROTTLE_SLOW_TICKS
+    else:
+        values["throttle"] = THROTTLE_STOPPED_TICKS
+
+# =========================
 # CAMERA BUFFER
 # =========================
 _latest_lock = threading.Lock()
 _latest_jpeg = None
 _latest_seq = 0
-_camera_stop = threading.Event()
 
-# =========================
-# CAMERA PIPE
-# =========================
 def ffmpeg_jpeg_pipe():
     cmd = [
         "ffmpeg",
@@ -199,23 +199,23 @@ def camera_worker():
     frame_count = 0
     last_label = ""
 
-    while not _camera_stop.is_set():
+    while True:
         p = ffmpeg_jpeg_pipe()
-
         for jpg in iter_jpegs(p.stdout):
+
             frame = cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_COLOR)
             if frame is None:
                 continue
 
             frame_count += 1
 
-            if (net is not None and MODE == "AUTOPILOT"
+            if (net and MODE == "AUTOPILOT"
                 and AUTOPILOT_RUNNING and not E_STOP
                 and frame_count % 4 == 0):
 
-                img = cv2.resize(frame, (224, 224))
+                img = cv2.resize(frame, (224,224))
                 img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                img = img.astype(np.float32) / 255.0
+                img = img.astype(np.float32)/255.0
                 img = np.expand_dims(img, axis=0)
 
                 net.setInput(img)
@@ -228,7 +228,7 @@ def camera_worker():
 
                 if confidence > CONF_THRESHOLD:
 
-                    if label in ["stop", "person"]:
+                    if label in ["stop","person"]:
                         values["throttle"] = THROTTLE_STOPPED_TICKS
 
                     elif label == "go":
@@ -240,11 +240,13 @@ def camera_worker():
                     elif label == "Uturn":
                         values["steering"] = STEERING_RIGHT_TICKS
 
-            cv2.putText(frame, f"Mode: {MODE}", (10,20),
-                        cv2.FONT_HERSHEY_SIMPLEX,0.6,(0,255,255),2)
+                    elif label == "background":
+                        line_follow(frame)
 
+            cv2.putText(frame, f"Mode:{MODE}", (10,20),
+                        cv2.FONT_HERSHEY_SIMPLEX,0.6,(0,255,255),2)
             cv2.putText(frame,
-                        f"T:{values['throttle']}  S:{values['steering']}",
+                        f"T:{values['throttle']} S:{values['steering']}",
                         (10,50),
                         cv2.FONT_HERSHEY_SIMPLEX,0.6,(0,255,0),2)
 
@@ -258,23 +260,22 @@ def camera_worker():
                 _latest_seq += 1
 
 # =========================
-# MJPEG
+# MJPEG STREAM
 # =========================
 @app.route("/mjpg")
 def mjpg():
     def generate():
         boundary = b"--frame\r\n"
-        last_seq = -1
+        last = -1
         while True:
             with _latest_lock:
                 seq = _latest_seq
                 jpg = _latest_jpeg
-            if jpg is None or seq == last_seq:
+            if jpg is None or seq == last:
                 time.sleep(0.01)
                 continue
-            last_seq = seq
+            last = seq
             yield boundary + b"Content-Type: image/jpeg\r\n\r\n" + jpg + b"\r\n"
-
     return Response(generate(),
         mimetype="multipart/x-mixed-replace; boundary=frame")
 
@@ -300,18 +301,15 @@ button{padding:10px;margin:5px;font-size:16px;border:none;border-radius:6px;}
 </head>
 <body>
 <div class="container">
-<div class="video">
-<img src="/mjpg">
-</div>
+<div class="video"><img src="/mjpg"></div>
 <div class="controls">
 <button onclick="fetch('/mode')">Toggle Mode</button>
 <button onclick="fetch('/autopilot/start')">Autopilot Start</button>
 <button onclick="fetch('/autopilot/pause')">Autopilot Pause</button>
-<button class="estop" onclick="fetch('/estop')">E-STOP</button>
-<br>
-Throttle: <span id="t">--</span> |
-Steering: <span id="s">--</span> |
-Mode: <span id="m">--</span>
+<button class="estop" onclick="fetch('/estop')">E-STOP</button><br>
+Throttle:<span id="t">--</span> |
+Steering:<span id="s">--</span> |
+Mode:<span id="m">--</span>
 </div>
 </div>
 <script>
@@ -378,13 +376,12 @@ def control_loop():
 if __name__ == "__main__":
     signal.signal(signal.SIGINT, lambda s,f: exit(0))
 
-    print("Loading model...")
     try:
         net = cv2.dnn.readNetFromONNX(MODEL_PATH)
-        print("Model loaded.")
+        print("AI model loaded")
     except:
-        print("No model found. Autopilot disabled.")
         net=None
+        print("No model found")
 
     pwm = PCA9685(I2C_BUS, PCA9685_ADDR, PCA9685_FREQ)
 
